@@ -1,6 +1,22 @@
-streamlit
-pandas
-matplotlib
-scipy
-numpy
-plotly
+# SERS Plotter v12.1 - Python dependencies
+
+streamlit>=1.28.0
+pandas>=2.0.0
+matplotlib>=3.7.0
+numpy>=1.24.0
+scipy>=1.11.0
+plotly>=5.17.0
+
+# Poznámky:
+# - Streamlit: Webové rozhraní aplikace
+# - Pandas: Načítání a zpracování dat
+# - Matplotlib: Generování statických grafů
+# - NumPy: Numerické operace
+# - SciPy: Baseline korekce a detekce píků
+# - Plotly: Interaktivní náhled
+
+# Instalace:
+# pip install -r requirements.txt
+
+# Nebo jednodušeji:
+# pip install streamlit pandas matplotlib numpy scipy plotly
