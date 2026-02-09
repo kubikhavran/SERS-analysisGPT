@@ -19,7 +19,7 @@ st.set_page_config(page_title="SERS Plotter v12 - Universal", layout="wide")
 
 st.title("🧪 Univerzální Generátor SERS Spekter pro Publikace")
 st.markdown("""
-**v12.1**: Šablony nastavení, baseline korekce, pokročilá normalizace spekter
+**v12.2**: Vylepšený výběr spekter, vlastní šablony popisků, rychlé akce
 """)
 
 # --- FUNKCE PRO BASELINE KOREKCI ---
@@ -320,6 +320,33 @@ if uploaded_files:
                 help="Přidá mínus před všechny nenulové hodnoty (50 → -50)"
             )
             
+            st.divider()
+            
+            # NOVÉ: Vlastní formát popisků
+            st.write("**📝 Formát popisků:**")
+            label_format_mode = st.radio(
+                "Typ:",
+                ["Jen hodnota (např. '-100 mV')", "Vlastní šablona", "Název souboru"],
+                index=0,
+                help="Jak se budou zobrazovat popisky spekter"
+            )
+            
+            if label_format_mode == "Vlastní šablona":
+                label_template = st.text_input(
+                    "Šablona popisku:",
+                    "{voltage} mV",
+                    help="Použijte {voltage} pro hodnotu napětí, {filename} pro název souboru. Např: 'Vzorek {voltage}mV' nebo '{voltage}mV dopředný sken'"
+                )
+                
+                # Ukázka
+                sample_voltage = -100 if force_minus else 100
+                sample_preview = label_template.replace("{voltage}", str(sample_voltage)).replace("{filename}", "sample.txt")
+                st.caption(f"📋 Ukázka: {sample_preview}")
+            else:
+                label_template = None
+            
+            st.divider()
+            
             # Řazení (stacking)
             stack_order = st.radio(
                 "Pořadí spekter (shora dolů):",
@@ -344,7 +371,17 @@ if uploaded_files:
             
             new_item = item.copy()
             new_item['volts'] = final_volts
-            new_item['label'] = f"{final_volts} mV"
+            
+            # Generování popisku podle zvoleného formátu
+            if label_format_mode == "Název souboru":
+                new_item['label'] = Path(item['filename']).stem
+            elif label_format_mode == "Vlastní šablona" and label_template:
+                label = label_template.replace("{voltage}", str(final_volts))
+                label = label.replace("{filename}", Path(item['filename']).stem)
+                new_item['label'] = label
+            else:  # "Jen hodnota"
+                new_item['label'] = f"{final_volts} mV"
+            
             processed_batch.append(new_item)
         
         # Seřazení
@@ -356,12 +393,39 @@ if uploaded_files:
         options = [s['label'] for s in processed_batch]
         default_selection = [s['label'] for s in processed_batch if abs(s['raw_volts']) % auto_step == 0]
         
+        # Rychlé akce
+        st.write("### 🎯 Výběr Spekter")
+        col1, col2, col3, col4 = st.columns(4)
+        
+        select_all = col1.button("✅ Vybrat vše", use_container_width=True)
+        select_none = col2.button("❌ Zrušit vše", use_container_width=True)
+        select_step = col3.button(f"🎚️ Krok {auto_step}mV", use_container_width=True)
+        invert_selection = col4.button("🔄 Invertovat", use_container_width=True)
+        
+        # Inicializace session state pro výběr
+        if 'voltage_selection' not in st.session_state or select_all or select_none or select_step or invert_selection:
+            if select_all:
+                st.session_state.voltage_selection = options
+            elif select_none:
+                st.session_state.voltage_selection = []
+            elif select_step:
+                st.session_state.voltage_selection = default_selection
+            elif invert_selection:
+                current = st.session_state.get('voltage_selection', default_selection)
+                st.session_state.voltage_selection = [opt for opt in options if opt not in current]
+            else:
+                st.session_state.voltage_selection = default_selection
+        
         selected_labels = st.multiselect(
-            "🎯 Vyberte spektra k zobrazení:",
+            "Zahrnout do grafu:",
             options=options,
-            default=default_selection,
-            help="Vyberte spektra, která chcete zahrnout do finálního grafu"
+            default=st.session_state.voltage_selection,
+            help="Pořadí zde určuje pořadí v grafu (odspodu nahoru)",
+            key="voltage_multiselect"
         )
+        
+        # Aktualizace session state
+        st.session_state.voltage_selection = selected_labels
         
         final_data_list = [s for s in processed_batch if s['label'] in selected_labels]
     
@@ -414,19 +478,44 @@ if uploaded_files:
         
         # Výběr spekter
         options = [item['display_label'] for item in all_files_meta]
+        
+        # Rychlé akce
+        st.write("### 🎯 Výběr Spekter")
+        col1, col2, col3 = st.columns(3)
+        
+        select_all_general = col1.button("✅ Vybrat vše", use_container_width=True, key="select_all_general")
+        select_none_general = col2.button("❌ Zrušit vše", use_container_width=True, key="select_none_general")
+        invert_general = col3.button("🔄 Invertovat", use_container_width=True, key="invert_general")
+        
+        # Inicializace session state
+        if 'general_selection' not in st.session_state or select_all_general or select_none_general or invert_general:
+            if select_all_general:
+                st.session_state.general_selection = options
+            elif select_none_general:
+                st.session_state.general_selection = []
+            elif invert_general:
+                current = st.session_state.get('general_selection', options)
+                st.session_state.general_selection = [opt for opt in options if opt not in current]
+            else:
+                st.session_state.general_selection = options
+        
+        if sort_mode == "Vlastní":
+            st.info("💡 Vlastní řazení: Pořadí v seznamu níže určuje pořadí v grafu (odspodu nahoru). Přesuňte položky myší.")
+        
         selected_labels = st.multiselect(
-            "🎯 Vyberte spektra k zobrazení:",
+            "Zahrnout do grafu:",
             options=options,
-            default=options,
-            help="Vyberte a přeuspořádejte spektra podle potřeby"
+            default=st.session_state.general_selection,
+            help="Vyberte spektra a přeuspořádejte je tažením. Pořadí zde = pořadí v grafu odspodu nahoru.",
+            key="general_multiselect"
         )
         
-        final_data_list = [item for item in all_files_meta if item['display_label'] in selected_labels]
+        # Aktualizace session state
+        st.session_state.general_selection = selected_labels
         
-        # Zachování pořadí z multiselect pro vlastní řazení
-        if sort_mode == "Vlastní":
-            label_to_item = {item['display_label']: item for item in final_data_list}
-            final_data_list = [label_to_item[label] for label in selected_labels if label in label_to_item]
+        # Zachování pořadí z multiselect (multiselect v Streamlit zachovává pořadí jak uživatel vybírá)
+        label_to_item = {item['display_label']: item for item in all_files_meta}
+        final_data_list = [label_to_item[label] for label in selected_labels if label in label_to_item]
     
     # ======================
     # REŽIM 3: POKROČILÝ
@@ -468,6 +557,26 @@ if uploaded_files:
                 force_minus = st.checkbox("Záporné hodnoty napětí", value=True)
                 auto_step = st.number_input("Krok pro auto-výběr (mV)", value=100, step=10)
                 
+                # Vlastní formát popisků
+                st.divider()
+                st.write("**📝 Formát popisků:**")
+                adv_label_format = st.radio(
+                    "Typ:",
+                    ["Jen hodnota", "Vlastní šablona", "Název souboru"],
+                    index=0,
+                    key="adv_label_format"
+                )
+                
+                if adv_label_format == "Vlastní šablona":
+                    adv_label_template = st.text_input(
+                        "Šablona:",
+                        "{voltage} mV",
+                        help="Použijte {voltage} pro hodnotu napětí",
+                        key="adv_label_template"
+                    )
+                else:
+                    adv_label_template = None
+                
                 # Zpracování
                 for item in all_files_meta:
                     if item['has_voltage']:
@@ -475,7 +584,16 @@ if uploaded_files:
                         if force_minus and final_volts > 0:
                             final_volts = -final_volts
                         item['volts'] = final_volts
-                        item['display_label'] = f"{final_volts} mV"
+                        
+                        # Generování popisku
+                        if adv_label_format == "Název souboru":
+                            item['display_label'] = Path(item['filename']).stem
+                        elif adv_label_format == "Vlastní šablona" and adv_label_template:
+                            label = adv_label_template.replace("{voltage}", str(final_volts))
+                            label = label.replace("{filename}", Path(item['filename']).stem)
+                            item['display_label'] = label
+                        else:  # "Jen hodnota"
+                            item['display_label'] = f"{final_volts} mV"
                     else:
                         item['display_label'] = Path(item['filename']).stem
                 
@@ -505,11 +623,36 @@ if uploaded_files:
         else:
             default_selection = options
         
+        # Rychlé akce
+        st.write("### 🎯 Výběr Spekter")
+        col1, col2, col3 = st.columns(3)
+        
+        select_all_adv = col1.button("✅ Vybrat vše", use_container_width=True, key="select_all_adv")
+        select_none_adv = col2.button("❌ Zrušit vše", use_container_width=True, key="select_none_adv")
+        invert_adv = col3.button("🔄 Invertovat", use_container_width=True, key="invert_adv")
+        
+        # Inicializace session state
+        if 'advanced_selection' not in st.session_state or select_all_adv or select_none_adv or invert_adv:
+            if select_all_adv:
+                st.session_state.advanced_selection = options
+            elif select_none_adv:
+                st.session_state.advanced_selection = []
+            elif invert_adv:
+                current = st.session_state.get('advanced_selection', default_selection)
+                st.session_state.advanced_selection = [opt for opt in options if opt not in current]
+            else:
+                st.session_state.advanced_selection = default_selection
+        
         selected_labels = st.multiselect(
-            "🎯 Vyberte spektra:",
+            "Zahrnout do grafu:",
             options=options,
-            default=default_selection
+            default=st.session_state.advanced_selection,
+            help="Pořadí zde určuje pořadí v grafu (odspodu nahoru)",
+            key="advanced_multiselect"
         )
+        
+        # Aktualizace session state
+        st.session_state.advanced_selection = selected_labels
         
         final_data_list = [item for item in all_files_meta if item['display_label'] in selected_labels]
 
@@ -1096,31 +1239,35 @@ if uploaded_files:
 else:
     # Uvítací obrazovka
     st.info("""
-    ### 👋 Vítejte v SERS Plotter v12.1!
+    ### 👋 Vítejte v SERS Plotter v12.2!
     
     **Jak začít:**
     1. Nahrajte .txt soubory s vašimi Ramanovými spektry
     2. Vyberte režim práce (napěťové série, obecná spektra, nebo pokročilý)
-    3. Aplikujte baseline korekci a normalizaci (podle potřeby)
-    4. Upravte vzhled a označte píky podle potřeby
-    5. Uložte nastavení jako šablonu pro budoucí použití
-    6. Exportujte finální graf v požadovaném formátu
+    3. Použijte rychlá tlačítka (✅ Vybrat vše, ❌ Zrušit vše, 🔄 Invertovat)
+    4. Nastavte vlastní formát popisků (volitelné)
+    5. Aplikujte baseline korekci a normalizaci (podle potřeby)
+    6. Upravte vzhled a označte píky
+    7. Uložte nastavení jako šablonu
+    8. Exportujte finální graf
     
-    **Nové funkce v12.1:**
-    - 💾 **Šablony** - ukládání a sdílení nastavení
-    - 🔬 **Baseline korekce** - odstranění fluorescenčního pozadí (ALS, Polynom, Rolling Ball)
-    - 📊 **Normalizace** - sjednocení intenzit pro lepší porovnání
-    - 🎯 Tři režimy práce pro různé typy spekter
-    - 🎨 Pokročilé možnosti stylování
-    - 📍 Flexibilní správa píků
-    - 💾 Export do více formátů najednou
-    - 🔍 Interaktivní náhled před exportem
+    **Nové ve v12.2:**
+    - ⚡ **Rychlé akce** - tlačítka pro výběr/zrušení/invertování spekter
+    - 📝 **Vlastní šablony popisků** - např. "Vzorek {voltage}mV" nebo "{voltage}mV dopředný sken"
+    - 🎯 **Lepší multiselect** - přehlednější výběr a řazení spekter
+    - 🔄 **Drag-and-drop** - přeuspořádání spekter tažením v multiselect
+    
+    **Předchozí funkce:**
+    - 💾 Šablony nastavení - ukládání a sdílení
+    - 🔬 Baseline korekce (ALS, Polynom, Rolling Ball)
+    - 📊 Normalizace spekter
+    - 🎯 Tři režimy práce
+    - 📍 Pokročilá správa píků
     
     **Podporované formáty:**
     - `.txt` soubory se dvěma sloupci (x, y) oddělenými mezerou nebo tabulátorem
     
-    **Tip:** Pro nejlepší výsledky použijte data se správně pojmenovanými soubory 
-    (např. `sample_100mV.txt`, `sample_-200mV_reverse.txt`)
+    **Tip:** Pro automatické popisky použijte šablonu "{voltage} mV" nebo přidejte vlastní text
     """)
     
     # Rychlá nápověda
