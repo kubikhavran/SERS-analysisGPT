@@ -4,813 +4,1213 @@ import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 import numpy as np
 from scipy.signal import find_peaks, savgol_filter
+from scipy.sparse import diags, csc_matrix
+from scipy.sparse.linalg import spsolve
+from scipy.ndimage import minimum_filter
 import re
 import io
-import math
-import tempfile
-import zipfile
-from dataclasses import dataclass
-from typing import Optional, Tuple, Dict, Any, List
-
+import json
 import plotly.graph_objects as go
+from pathlib import Path
+from datetime import datetime
 
-# Optional baseline (sparse AsLS)
-from scipy import sparse
-from scipy.sparse.linalg import spsolve
+# --- KONFIGURACE STRÁNKY ---
+st.set_page_config(page_title="SERS Plotter v12 - Universal", layout="wide")
 
+st.title("🧪 Univerzální Generátor SERS Spekter pro Publikace")
+st.markdown("""
+**v12.1**: Šablony nastavení, baseline korekce, pokročilá normalizace spekter
+""")
 
-# =========================================================
-# CONFIG
-# =========================================================
-APP_VERSION = "v10.1"
-st.set_page_config(page_title=f"SERS Plotter {APP_VERSION}", layout="wide")
-st.title("Generátor SERS/EC-SERS spekter pro publikace 🧪")
-st.caption(f"{APP_VERSION}: univerzální workflow (s/bez napětí), Auto-offset (fix plochých čar), tabulka pro labely/skupiny, batch export do ZIP, baseline/normalizace/resampling.")
+# --- FUNKCE PRO BASELINE KOREKCI ---
 
-
-# =========================================================
-# HELPERS
-# =========================================================
-@dataclass
-class Meta:
-    filename: str
-    stem: str
-    group_key: str
-    potential_mV: Optional[float] = None
-    step_mV: Optional[float] = None
-
-
-def safe_stem(name: str) -> str:
-    return re.sub(r"\.[^.]+$", "", name)
-
-
-def parse_meta_from_filename(filename: str) -> Meta:
+def baseline_als(y, lam=1e6, p=0.01, niter=10):
     """
-    Robustně vytáhne potenciál/step z konce názvu, pokud existuje.
-    group_key = název bez trailing *_<step>mV_<pot>mV nebo *_<pot>mV
-    Funguje i pro ne-EC (mV neexistuje).
+    Asymmetric Least Squares (ALS) baseline korekce
+    Parametry:
+        y: spektrum
+        lam: smoothness (větší = hladší baseline)
+        p: asymmetry (menší = více se přizpůsobí minimům)
+        niter: počet iterací
     """
-    stem = safe_stem(filename)
-    tokens = stem.split("_")
+    L = len(y)
+    D = diags([1, -2, 1], [0, -1, -2], shape=(L, L-2))
+    D = lam * D.dot(D.transpose())
+    w = np.ones(L)
+    W = diags(w, 0, shape=(L, L))
+    
+    for i in range(niter):
+        W.setdiag(w)
+        Z = W + D
+        z = spsolve(csc_matrix(Z), w*y)
+        w = p * (y > z) + (1-p) * (y < z)
+    
+    return z
 
-    potential = None
-    step = None
-
-    def is_mv(tok: str) -> bool:
-        return re.fullmatch(r"-?\d+(?:\.\d+)?mV", tok) is not None
-
-    tmp = tokens[:]
-    if tmp and is_mv(tmp[-1]):
-        potential = float(tmp[-1].replace("mV", ""))
-        tmp.pop()
-        if tmp and is_mv(tmp[-1]):
-            step = float(tmp[-1].replace("mV", ""))
-            tmp.pop()
-
-    group_key = "_".join(tmp) if tmp else stem
-
-    return Meta(
-        filename=filename,
-        stem=stem,
-        group_key=group_key,
-        potential_mV=potential,
-        step_mV=step
-    )
-
-
-@st.cache_data(show_spinner=False)
-def load_txt_bytes(file_bytes: bytes) -> Tuple[np.ndarray, np.ndarray]:
+def baseline_polynomial(y, degree=3):
     """
-    Load 2-column spectra from bytes (txt). Robust delimiters.
+    Polynomiální baseline korekce
     """
-    df = pd.read_csv(io.BytesIO(file_bytes), sep=r"[,\t; ]+", header=None, engine="python")
-    df = df.iloc[:, :2]
-    df.columns = ["x", "y"]
-    df["x"] = pd.to_numeric(df["x"], errors="coerce")
-    df["y"] = pd.to_numeric(df["y"], errors="coerce")
-    df = df.dropna().sort_values("x")
-    return df["x"].values.astype(float), df["y"].values.astype(float)
+    x = np.arange(len(y))
+    coeffs = np.polyfit(x, y, degree)
+    baseline = np.polyval(coeffs, x)
+    return baseline
 
-
-def try_load_wdf(uploaded_file) -> Optional[Tuple[np.ndarray, np.ndarray, str]]:
+def baseline_rolling_ball(y, window_size=50):
     """
-    Attempts to read .wdf using one of supported libraries.
-    Returns (x, y, msg) or None if not possible.
+    Rolling ball baseline korekce
     """
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".wdf") as tmp:
-        tmp.write(uploaded_file.getvalue())
-        tmp_path = tmp.name
+    baseline = minimum_filter(y, size=window_size, mode='constant')
+    return baseline
 
-    # Try renishawWiRE
-    try:
-        import renishawWiRE as rw
-        w = rw.WDFReader(tmp_path)
-        x = np.array(w.xdata, dtype=float)
-        y = np.array(w.spectra[0], dtype=float)  # first spectrum by default
-        idx = np.argsort(x)
-        return x[idx], y[idx], "OK (.wdf přes renishawWiRE)"
-    except Exception:
-        pass
+def normalize_spectrum(y, method='max'):
+    """
+    Normalizace spektra
+    Parametry:
+        y: spektrum
+        method: 'max' (na maximum), 'area' (na plochu), 'minmax' (na rozsah 0-1)
+    """
+    if method == 'max':
+        return y / np.max(y) if np.max(y) != 0 else y
+    elif method == 'area':
+        area = np.trapz(np.abs(y))
+        return y / area if area != 0 else y
+    elif method == 'minmax':
+        min_val, max_val = np.min(y), np.max(y)
+        if max_val - min_val != 0:
+            return (y - min_val) / (max_val - min_val)
+        else:
+            return y
+    else:
+        return y
 
-    # Try renishaw-wdf
-    try:
-        from renishaw_wdf import WDF
-        w = WDF(tmp_path)
-        x = np.array(w.x, dtype=float)
-        y = np.array(w.spectra[0], dtype=float)
-        idx = np.argsort(x)
-        return x[idx], y[idx], "OK (.wdf přes renishaw-wdf)"
-    except Exception:
-        pass
+# --- POMOCNÉ FUNKCE ---
 
-    # Try RamanSPy
-    try:
-        import ramanspy as rp
-        spec = rp.load.renishaw(tmp_path)
-        x = np.array(spec.spectral_axis, dtype=float)
-        y = np.array(spec.spectra[0], dtype=float)
-        idx = np.argsort(x)
-        return x[idx], y[idx], "OK (.wdf přes ramanspy)"
-    except Exception:
-        pass
-
+def get_voltage_from_filename(filename):
+    """Vytáhne poslední číslo před 'mV'."""
+    matches = re.findall(r'([-\d]+)mV', filename)
+    if matches:
+        return int(matches[-1])
     return None
 
+def detect_scan_direction(filename):
+    """Rozpozná směr skenu podle klíčového slova v názvu."""
+    filename_lower = filename.lower()
+    if "reverse" in filename_lower or "zp" in filename_lower or "back" in filename_lower:
+        return "reverse"
+    return "forward"
 
-def baseline_asls(y: np.ndarray, lam: float = 1e6, p: float = 1e-3, niter: int = 10) -> np.ndarray:
-    """
-    Asymmetric least squares baseline (sparse).
-    """
-    L = y.size
-    if L < 3:
-        return np.zeros_like(y)
-    D = sparse.diags([1.0, -2.0, 1.0], [0, 1, 2], shape=(L - 2, L))
-    w = np.ones(L)
-    for _ in range(niter):
-        W = sparse.spdiags(w, 0, L, L)
-        Z = W + lam * (D.T @ D)
-        z = spsolve(Z, w * y)
-        w = p * (y > z) + (1 - p) * (y < z)
-    return np.asarray(z)
+def load_data(uploaded_file):
+    """Načte data z txt souboru."""
+    try:
+        uploaded_file.seek(0)
+        df = pd.read_csv(uploaded_file, sep=r'\s+', header=None, engine='python')
+        df = df.iloc[:, :2]
+        df.columns = ['x', 'y']
+        df['x'] = pd.to_numeric(df['x'], errors='coerce')
+        df['y'] = pd.to_numeric(df['y'], errors='coerce')
+        df = df.dropna()
+        df = df.sort_values(by='x')
+        return df['x'].values, df['y'].values
+    except Exception as e:
+        st.error(f"Chyba při načítání souboru: {e}")
+        return None, None
 
-
-def resample_to_grid(x: np.ndarray, y: np.ndarray, x_new: np.ndarray) -> np.ndarray:
-    # linear interp (stable & fast)
-    return np.interp(x_new, x, y)
-
-
-def normalize_y(x: np.ndarray, y: np.ndarray, mode: str, peak_center: float = 1082, peak_window: float = 5) -> np.ndarray:
-    mode = (mode or "none").lower()
-    if mode == "none":
-        return y
-    if mode == "max":
-        m = float(np.max(y))
-        return y / (m if m != 0 else 1.0)
-    if mode == "vector":
-        n = float(np.linalg.norm(y))
-        return y / (n if n != 0 else 1.0)
-    if mode == "peak":
-        m = (x >= peak_center - peak_window) & (x <= peak_center + peak_window)
-        denom = float(np.max(y[m])) if np.any(m) else float(np.max(y))
-        return y / (denom if denom != 0 else 1.0)
-    return y
-
-
-def amplitude_scale(y: np.ndarray) -> float:
-    """
-    Robustní amplitude scale: (P99 - P1).
-    Funguje i po baseline / normalizaci.
-    """
-    if y.size < 10:
-        return 1.0
-    a = float(np.percentile(y, 99) - np.percentile(y, 1))
-    return a if a > 0 else float(np.std(y) if np.std(y) > 0 else 1.0)
-
-
-def compute_auto_offset(curves: List[Dict[str, Any]]) -> float:
-    amps = [amplitude_scale(c["y"]) for c in curves if c.get("y") is not None and len(c["y"]) > 10]
-    if not amps:
-        return 1.0
-    return float(np.median(amps))
-
-
-def find_nearest_idx(array: np.ndarray, value: float) -> int:
+def find_nearest_idx(array, value):
+    """Najde nejbližší index k dané hodnotě."""
     array = np.asarray(array)
-    return int((np.abs(array - value)).argmin())
+    idx = (np.abs(array - value)).argmin()
+    return idx
 
+def generate_label(item, mode, custom_label=None):
+    """Generuje popisek podle zvoleného režimu."""
+    if custom_label:
+        return custom_label
+    
+    if mode == "voltage":
+        return item.get('label', item['filename'])
+    elif mode == "filename":
+        return Path(item['filename']).stem
+    elif mode == "number":
+        return f"Spektrum {item.get('index', 1)}"
+    else:
+        return item['filename']
 
-def local_max_near(x: np.ndarray, y: np.ndarray, target: float, tol: float = 4.0) -> Optional[Tuple[float, float]]:
-    m = (x >= target - tol) & (x <= target + tol)
-    if not np.any(m):
+# --- FUNKCE PRO ŠABLONY ---
+
+def save_template(settings, name):
+    """Uloží nastavení jako šablonu."""
+    if 'templates' not in st.session_state:
+        st.session_state.templates = {}
+    
+    template = {
+        'name': name,
+        'created': datetime.now().isoformat(),
+        'settings': settings
+    }
+    st.session_state.templates[name] = template
+    return True
+
+def load_template(name):
+    """Načte šablonu."""
+    if 'templates' not in st.session_state or name not in st.session_state.templates:
         return None
-    xi = x[m]
-    yi = y[m]
-    j = int(np.argmax(yi))
-    return float(xi[j]), float(yi[j])
+    return st.session_state.templates[name]['settings']
 
+def get_current_settings():
+    """Získá aktuální nastavení z session_state."""
+    settings = {}
+    
+    # Projde všechny klíče v session_state a uloží relevantní
+    for key in st.session_state:
+        if not key.startswith('_') and key not in ['templates', 'custom_labels', 'custom_order']:
+            settings[key] = st.session_state[key]
+    
+    return settings
 
-def build_zip(files: Dict[str, bytes]) -> bytes:
-    bio = io.BytesIO()
-    with zipfile.ZipFile(bio, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for name, b in files.items():
-            zf.writestr(name, b)
-    bio.seek(0)
-    return bio.getvalue()
+def export_templates_json():
+    """Exportuje všechny šablony do JSON."""
+    if 'templates' not in st.session_state:
+        return None
+    
+    return json.dumps(st.session_state.templates, indent=2)
 
+def import_templates_json(json_str):
+    """Importuje šablony z JSON."""
+    try:
+        templates = json.loads(json_str)
+        if 'templates' not in st.session_state:
+            st.session_state.templates = {}
+        st.session_state.templates.update(templates)
+        return True
+    except Exception as e:
+        st.error(f"Chyba při importu: {e}")
+        return False
 
-# =========================================================
-# INPUT
-# =========================================================
-st.sidebar.header("0. Vstup")
+# --- SESSION STATE PRO PERZISTENCI ---
+if 'custom_labels' not in st.session_state:
+    st.session_state.custom_labels = {}
+if 'custom_order' not in st.session_state:
+    st.session_state.custom_order = []
+if 'templates' not in st.session_state:
+    st.session_state.templates = {}
+
+# --- SPRÁVA ŠABLON (HORNÍ LIŠTA) ---
+col_title, col_template = st.columns([3, 1])
+
+with col_template:
+    with st.popover("💾 Šablony", use_container_width=True):
+        st.subheader("Správa šablon")
+        
+        # Uložit novou šablonu
+        with st.expander("➕ Uložit aktuální nastavení", expanded=False):
+            template_name = st.text_input("Název šablony:", "")
+            if st.button("💾 Uložit šablonu"):
+                if template_name:
+                    settings = get_current_settings()
+                    save_template(settings, template_name)
+                    st.success(f"✅ Šablona '{template_name}' uložena!")
+                else:
+                    st.warning("⚠️ Zadejte název šablony")
+        
+        # Načíst existující šablonu
+        if st.session_state.templates:
+            st.divider()
+            st.write("**📂 Uložené šablony:**")
+            
+            for template_name in st.session_state.templates:
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    template_info = st.session_state.templates[template_name]
+                    created = template_info.get('created', 'N/A')[:10]
+                    st.text(f"📄 {template_name} ({created})")
+                with col2:
+                    if st.button("📥", key=f"load_{template_name}", help="Načíst"):
+                        settings = load_template(template_name)
+                        if settings:
+                            for key, value in settings.items():
+                                st.session_state[key] = value
+                            st.rerun()
+        
+        # Export/Import
+        st.divider()
+        with st.expander("📤 Export/Import šablon", expanded=False):
+            if st.session_state.templates:
+                json_export = export_templates_json()
+                st.download_button(
+                    "📥 Stáhnout všechny šablony (JSON)",
+                    json_export,
+                    "sers_templates.json",
+                    "application/json"
+                )
+            
+            uploaded_templates = st.file_uploader("📤 Načíst šablony ze souboru", type=['json'])
+            if uploaded_templates:
+                json_str = uploaded_templates.read().decode('utf-8')
+                if import_templates_json(json_str):
+                    st.success("✅ Šablony importovány!")
+                    st.rerun()
+
+# --- HLAVNÍ LOGIKA ---
+
+# Režim aplikace
+st.sidebar.header("🎯 Režim Práce")
+work_mode = st.sidebar.radio(
+    "Vyberte typ spekter:",
+    ["📊 Spektra s napětím (série)", "📈 Obecná spektra (libovolná)", "🔧 Pokročilý režim (max. kontrola)"],
+    help="Série = spektra měřená pod napětím, Obecná = jakákoliv spektra, Pokročilý = plná kontrola nad vším"
+)
+
 uploaded_files = st.file_uploader(
-    "Nahrajte spektra (.txt, případně .wdf)",
-    type=["txt", "wdf"],
-    accept_multiple_files=True
+    "📁 Nahrajte .txt soubory spekter", 
+    type=['txt'], 
+    accept_multiple_files=True,
+    help="Můžete nahrát libovolný počet souborů. Podporovány jsou .txt soubory s dvěma sloupci (x, y)."
 )
 
-if not uploaded_files:
-    st.info("Nahraj soubory a objeví se tabulka pro skupiny/labely + náhled a export.")
-    st.stop()
+if uploaded_files:
+    
+    # --- ZPRACOVÁNÍ NAHRANÝCH SOUBORŮ ---
+    all_files_meta = []
+    for idx, f in enumerate(uploaded_files):
+        raw_volts = get_voltage_from_filename(f.name)
+        direction = detect_scan_direction(f.name)
+        
+        all_files_meta.append({
+            'file': f,
+            'filename': f.name,
+            'index': idx + 1,
+            'raw_volts': raw_volts if raw_volts is not None else 0,
+            'direction': direction,
+            'has_voltage': raw_volts is not None
+        })
+    
+    st.success(f"✅ Načteno {len(all_files_meta)} souborů")
+    
+    # --- BOČNÍ PANEL: REŽIM-SPECIFICKÁ NASTAVENÍ ---
+    st.sidebar.header("1️⃣ Výběr a Úprava Spekter")
+    
+    # ======================
+    # REŽIM 1: SPEKTRA S NAPĚTÍM
+    # ======================
+    if "napětím" in work_mode:
+        with st.sidebar.expander("⚡ Nastavení napěťové série", expanded=True):
+            # Filtr směru skenu
+            scan_filter = st.radio(
+                "Směr skenu:",
+                ["Dopředný (Forward)", "Zpětný (Reverse)", "Všechny"],
+                index=0
+            )
+            
+            # Filtrace podle směru
+            if scan_filter == "Dopředný (Forward)":
+                current_batch = [x for x in all_files_meta if x['direction'] == 'forward']
+            elif scan_filter == "Zpětný (Reverse)":
+                current_batch = [x for x in all_files_meta if x['direction'] == 'reverse']
+            else:
+                current_batch = all_files_meta
+            
+            st.caption(f"📊 {len(current_batch)} souborů po filtraci")
+            st.divider()
+            
+            # Záporné znamínko
+            force_minus = st.checkbox(
+                "Záporné hodnoty napětí (-)",
+                value=True,
+                help="Přidá mínus před všechny nenulové hodnoty (50 → -50)"
+            )
+            
+            # Řazení (stacking)
+            stack_order = st.radio(
+                "Pořadí spekter (shora dolů):",
+                ["Od 0 do Max", "Od Max do 0"],
+                help="Určuje, které spektrum bude nahoře a které dole"
+            )
+            
+            # Rychlý výběr podle kroku
+            auto_step = st.number_input(
+                "Krok pro automatický výběr (mV)",
+                value=100,
+                step=10,
+                help="Vybere pouze spektra s násobky této hodnoty"
+            )
+        
+        # Zpracování napěťových dat
+        processed_batch = []
+        for item in current_batch:
+            final_volts = item['raw_volts']
+            if force_minus and final_volts > 0:
+                final_volts = -final_volts
+            
+            new_item = item.copy()
+            new_item['volts'] = final_volts
+            new_item['label'] = f"{final_volts} mV"
+            processed_batch.append(new_item)
+        
+        # Seřazení
+        processed_batch.sort(key=lambda x: x['volts'])
+        if stack_order == "Od Max do 0":
+            processed_batch.reverse()
+        
+        # Výběr spekter
+        options = [s['label'] for s in processed_batch]
+        default_selection = [s['label'] for s in processed_batch if abs(s['raw_volts']) % auto_step == 0]
+        
+        selected_labels = st.multiselect(
+            "🎯 Vyberte spektra k zobrazení:",
+            options=options,
+            default=default_selection,
+            help="Vyberte spektra, která chcete zahrnout do finálního grafu"
+        )
+        
+        final_data_list = [s for s in processed_batch if s['label'] in selected_labels]
+    
+    # ======================
+    # REŽIM 2: OBECNÁ SPEKTRA
+    # ======================
+    elif "Obecná" in work_mode:
+        with st.sidebar.expander("📋 Nastavení popisků", expanded=True):
+            label_mode = st.radio(
+                "Typ popisků:",
+                ["Název souboru", "Číslo (Spektrum 1, 2, ...)", "Vlastní text"],
+                help="Jak se budou označovat jednotlivá spektra"
+            )
+            
+            # Řazení
+            sort_mode = st.radio(
+                "Řazení spekter:",
+                ["Podle názvu souboru (A-Z)", "Podle pořadí nahrání", "Vlastní"],
+                help="Jak budou spektra seřazena v grafu (odspodu nahoru)"
+            )
+        
+        # Seřazení podle zvoleného módu
+        if sort_mode == "Podle názvu souboru (A-Z)":
+            all_files_meta.sort(key=lambda x: x['filename'])
+        elif sort_mode == "Vlastní":
+            st.sidebar.info("💡 Vlastní řazení: Přeuspořádejte pořadí v multiselect níže")
+        
+        # Generování popisků
+        for idx, item in enumerate(all_files_meta):
+            if label_mode == "Název souboru":
+                item['display_label'] = Path(item['filename']).stem
+            elif label_mode == "Číslo (Spektrum 1, 2, ...)":
+                item['display_label'] = f"Spektrum {idx + 1}"
+            else:  # Vlastní text
+                if item['filename'] not in st.session_state.custom_labels:
+                    st.session_state.custom_labels[item['filename']] = f"Spektrum {idx + 1}"
+                item['display_label'] = st.session_state.custom_labels[item['filename']]
+        
+        # Vlastní popisky - editace
+        if label_mode == "Vlastní text":
+            with st.sidebar.expander("✏️ Editace vlastních popisků", expanded=False):
+                for item in all_files_meta:
+                    new_label = st.text_input(
+                        f"📄 {item['filename'][:30]}...",
+                        value=st.session_state.custom_labels[item['filename']],
+                        key=f"label_{item['filename']}"
+                    )
+                    st.session_state.custom_labels[item['filename']] = new_label
+                    item['display_label'] = new_label
+        
+        # Výběr spekter
+        options = [item['display_label'] for item in all_files_meta]
+        selected_labels = st.multiselect(
+            "🎯 Vyberte spektra k zobrazení:",
+            options=options,
+            default=options,
+            help="Vyberte a přeuspořádejte spektra podle potřeby"
+        )
+        
+        final_data_list = [item for item in all_files_meta if item['display_label'] in selected_labels]
+        
+        # Zachování pořadí z multiselect pro vlastní řazení
+        if sort_mode == "Vlastní":
+            label_to_item = {item['display_label']: item for item in final_data_list}
+            final_data_list = [label_to_item[label] for label in selected_labels if label in label_to_item]
+    
+    # ======================
+    # REŽIM 3: POKROČILÝ
+    # ======================
+    else:  # Pokročilý režim
+        with st.sidebar.expander("🔧 Pokročilá kontrola", expanded=True):
+            st.info("💪 Tento režim kombinuje všechny možnosti")
+            
+            # Detekce napětí
+            has_voltage_files = any(item['has_voltage'] for item in all_files_meta)
+            
+            if has_voltage_files:
+                use_voltage_mode = st.checkbox(
+                    "Použít napěťový režim",
+                    value=True,
+                    help="Zapnout speciální funkce pro napěťové série"
+                )
+            else:
+                use_voltage_mode = False
+                st.warning("⚠️ Nebyly detekovány žádné hodnoty napětí v názvech souborů")
+            
+            # Typ popisků
+            label_mode = st.radio(
+                "Typ popisků:",
+                ["Auto (napětí pokud je, jinak název)", "Název souboru", "Číslo", "Vlastní"],
+            )
+            
+            # Řazení
+            sort_options = ["Podle názvu", "Podle pořadí nahrání"]
+            if use_voltage_mode:
+                sort_options.append("Podle napětí")
+            sort_options.append("Vlastní")
+            
+            sort_mode = st.radio("Řazení:", sort_options)
+            
+            if use_voltage_mode:
+                # Napěťové funkce
+                st.divider()
+                force_minus = st.checkbox("Záporné hodnoty napětí", value=True)
+                auto_step = st.number_input("Krok pro auto-výběr (mV)", value=100, step=10)
+                
+                # Zpracování
+                for item in all_files_meta:
+                    if item['has_voltage']:
+                        final_volts = item['raw_volts']
+                        if force_minus and final_volts > 0:
+                            final_volts = -final_volts
+                        item['volts'] = final_volts
+                        item['display_label'] = f"{final_volts} mV"
+                    else:
+                        item['display_label'] = Path(item['filename']).stem
+                
+                # Řazení podle napětí
+                if sort_mode == "Podle napětí":
+                    all_files_meta.sort(key=lambda x: x.get('volts', 0))
+            else:
+                # Obecný režim bez napětí
+                for idx, item in enumerate(all_files_meta):
+                    if label_mode == "Název souboru":
+                        item['display_label'] = Path(item['filename']).stem
+                    elif label_mode == "Číslo":
+                        item['display_label'] = f"Spektrum {idx + 1}"
+                    else:
+                        item['display_label'] = Path(item['filename']).stem
+            
+            # Aplikace řazení
+            if sort_mode == "Podle názvu":
+                all_files_meta.sort(key=lambda x: x['filename'])
+        
+        # Výběr spekter
+        options = [item['display_label'] for item in all_files_meta]
+        
+        if use_voltage_mode and 'auto_step' in locals():
+            default_selection = [item['display_label'] for item in all_files_meta 
+                                if item.get('has_voltage') and abs(item['raw_volts']) % auto_step == 0]
+        else:
+            default_selection = options
+        
+        selected_labels = st.multiselect(
+            "🎯 Vyberte spektra:",
+            options=options,
+            default=default_selection
+        )
+        
+        final_data_list = [item for item in all_files_meta if item['display_label'] in selected_labels]
 
-# Index table
-rows = []
-for f in uploaded_files:
-    meta = parse_meta_from_filename(f.name)
-    default_label = f"{int(meta.potential_mV)} mV" if meta.potential_mV is not None else meta.stem
+    # --- NASTAVENÍ VZHLEDU ---
+    st.sidebar.header("2️⃣ Vzhled a Export")
+    
+    with st.sidebar.expander("📏 Rozměry obrázku", expanded=False):
+        preset = st.selectbox(
+            "Předvolby:",
+            ["Vlastní", "Publikace (1200×1000)", "Prezentace (1920×1080)", "Poster (2400×1800)"]
+        )
+        
+        if preset == "Publikace (1200×1000)":
+            img_width_px, img_height_px, img_dpi = 1200, 1000, 300
+        elif preset == "Prezentace (1920×1080)":
+            img_width_px, img_height_px, img_dpi = 1920, 1080, 150
+        elif preset == "Poster (2400×1800)":
+            img_width_px, img_height_px, img_dpi = 2400, 1800, 300
+        else:
+            col_w, col_h = st.columns(2)
+            with col_w:
+                img_width_px = st.number_input("Šířka (px)", value=1200, step=100)
+            with col_h:
+                img_height_px = st.number_input("Výška (px)", value=1000, step=100)
+            img_dpi = st.number_input("DPI", value=300, step=50, help="Pro publikace doporučeno 300")
+        
+        figsize_w = img_width_px / img_dpi
+        figsize_h = img_height_px / img_dpi
+        
+        st.caption(f"📐 Výsledná velikost: {figsize_w:.2f}\" × {figsize_h:.2f}\" @ {img_dpi} DPI")
 
-    rows.append({
-        "include": True,
-        "file": f.name,
-        "group": meta.group_key,
-        "label": default_label,
-        "potential_mV": meta.potential_mV,
-        "step_mV": meta.step_mV,
-        "type": f.name.split(".")[-1].lower()
-    })
+    with st.sidebar.expander("🎨 Grafika a Osy", expanded=True):
+        # Paleta barev
+        col1, col2 = st.columns(2)
+        with col1:
+            palette_name = st.selectbox(
+                "Paleta barev:",
+                ["jet", "viridis", "plasma", "inferno", "magma", "coolwarm", "bwr", "rainbow", "turbo"],
+                index=0
+            )
+        with col2:
+            reverse_colors = st.checkbox("Obrátit paletu", value=False)
+        
+        st.divider()
+        
+        # Offset mezi spektry
+        offset_val = st.number_input(
+            "Offset mezi spektry (Y)",
+            value=2000,
+            step=100,
+            help="Vertikální rozestup mezi spektry"
+        )
+        
+        st.divider()
+        
+        # Popisky os
+        col1, col2 = st.columns(2)
+        with col1:
+            xlabel_text = st.text_input("Osa X:", "Ramanův posun (cm⁻¹)")
+        with col2:
+            ylabel_text = st.text_input("Osa Y:", "Intenzita (a.u.)")
+        
+        # Rozsah X
+        x_min_default, x_max_default = 300, 1800
+        x_range = st.slider(
+            "Rozsah osy X:",
+            0, 4000,
+            (x_min_default, x_max_default),
+            help="Zobrazená část spektra"
+        )
+        
+        # Další nastavení
+        col1, col2 = st.columns(2)
+        with col1:
+            invert_x = st.checkbox("Invertovat X", value=False)
+        with col2:
+            show_grid = st.checkbox("Zobrazit mřížku", value=False)
+        
+        st.divider()
+        
+        # Styly čar
+        col1, col2 = st.columns(2)
+        with col1:
+            line_width = st.slider("Tloušťka spekter:", 0.5, 5.0, 1.5, 0.1)
+        with col2:
+            font_size = st.slider("Velikost písma:", 8, 30, 14, 1)
+        
+        # Pokročilé
+        with st.expander("⚙️ Pokročilé styly", expanded=False):
+            axis_line_width = st.slider("Tloušťka os:", 0.5, 3.0, 1.5, 0.1)
+            label_position = st.radio("Pozice popisků spekter:", ["Vpravo", "Uvnitř grafu"], index=0)
+            smooth_spectra = st.checkbox("Vyhlazení spekter (Savitzky-Golay)", value=True)
+            if smooth_spectra:
+                smooth_window = st.slider("Okno vyhlazení:", 5, 21, 11, 2)
+                smooth_poly = st.slider("Polynom řádu:", 1, 5, 3, 1)
+    
+    # --- BASELINE KOREKCE ---
+    with st.sidebar.expander("🔬 Baseline Korekce", expanded=False):
+        apply_baseline = st.checkbox(
+            "Aplikovat baseline korekci",
+            value=False,
+            help="Odstraní fluorescenční pozadí ze spekter"
+        )
+        
+        if apply_baseline:
+            baseline_method = st.selectbox(
+                "Metoda:",
+                ["ALS (Asymmetric Least Squares)", "Polynom", "Rolling Ball"],
+                help="ALS je nejvšestrannější, Polynom je rychlý, Rolling Ball pro jednoduché pozadí"
+            )
+            
+            if "ALS" in baseline_method:
+                st.info("💡 ALS je nejlepší pro fluorescenční pozadí")
+                baseline_lam = st.slider(
+                    "Vyhlazení (λ):",
+                    100000, 10000000, 1000000, 100000,
+                    help="Větší hodnota = hladší baseline",
+                    format="%d"
+                )
+                baseline_p = st.slider(
+                    "Asymetrie (p):",
+                    0.001, 0.1, 0.01, 0.001,
+                    help="Menší hodnota = více se přizpůsobí minimům",
+                    format="%.3f"
+                )
+                baseline_niter = st.slider(
+                    "Iterace:",
+                    5, 20, 10, 1,
+                    help="Více iterací = přesnější, ale pomalejší"
+                )
+            
+            elif "Polynom" in baseline_method:
+                baseline_degree = st.slider(
+                    "Stupeň polynomu:",
+                    1, 6, 3, 1,
+                    help="Vyšší stupeň = složitější křivka baseline"
+                )
+            
+            else:  # Rolling Ball
+                baseline_window = st.slider(
+                    "Velikost okna:",
+                    10, 200, 50, 5,
+                    help="Větší okno = hladší baseline"
+                )
+            
+            # Náhled baseline
+            show_baseline_preview = st.checkbox(
+                "Zobrazit náhled baseline",
+                value=False,
+                help="Přidá do grafu samotnou baseline pro kontrolu"
+            )
+    
+    # --- NORMALIZACE ---
+    with st.sidebar.expander("📊 Normalizace Spekter", expanded=False):
+        apply_normalization = st.checkbox(
+            "Normalizovat spektra",
+            value=False,
+            help="Přizpůsobí všechna spektra na stejnou velikost"
+        )
+        
+        if apply_normalization:
+            norm_method = st.selectbox(
+                "Metoda normalizace:",
+                ["Maximum = 1", "Plocha = 1", "Min-Max (0-1)"],
+                help="Maximum: nejjednodušší, Plocha: pro kvantitativní porovnání, Min-Max: celý rozsah 0-1"
+            )
+            
+            norm_scale = st.slider(
+                "Škálování po normalizaci:",
+                100, 10000, 1000, 100,
+                help="Násobitel pro lepší vizualizaci"
+            )
+            
+            st.info("💡 Normalizace se aplikuje před offsetem mezi spektry")
 
-df_index = pd.DataFrame(rows)
-ec_detected = df_index["potential_mV"].notna().sum() >= 2
+    # --- SPRÁVA PÍKŮ ---
+    st.sidebar.header("3️⃣ Správa Píků")
+    
+    with st.sidebar.expander("📍 Nastavení píků", expanded=True):
+        peak_target = st.radio(
+            "Zobrazit píky u:",
+            ["Nejvyšší spektrum", "Nejnižší spektrum", "Všechna spektra", "Konkrétní spektrum", "Vypnuto"],
+            index=0
+        )
+        
+        if peak_target == "Konkrétní spektrum" and final_data_list:
+            peak_spectrum_idx = st.selectbox(
+                "Vyberte spektrum:",
+                range(len(final_data_list)),
+                format_func=lambda x: final_data_list[x].get('display_label', final_data_list[x]['filename'])
+            )
+        
+        st.divider()
+        
+        # Detekce píků
+        col1, col2 = st.columns(2)
+        with col1:
+            use_auto_peaks = st.checkbox("Auto-detekce", value=True)
+        with col2:
+            show_peak_lines = st.checkbox("Vodící čáry", value=True)
+        
+        if use_auto_peaks:
+            prominence = st.slider(
+                "Citlivost detekce:",
+                10, 2000, 100, 10,
+                help="Vyšší hodnota = méně píků"
+            )
+            min_distance = st.slider(
+                "Min. vzdálenost píků:",
+                5, 100, 30, 5,
+                help="Minimální vzdálenost mezi dvěma píky"
+            )
+        
+        st.divider()
+        
+        # Manuální úpravy
+        col1, col2 = st.columns(2)
+        with col1:
+            manual_add_str = st.text_input(
+                "➕ Přidat píky:",
+                "",
+                help="Oddělte čárkou, např: 1001, 1320, 1580"
+            )
+        with col2:
+            manual_remove_str = st.text_input(
+                "➖ Odstranit píky:",
+                "",
+                help="Oddělte čárkou, např: 220, 450"
+            )
+        
+        # Styl píků
+        with st.expander("🎨 Styl popisků píků", expanded=False):
+            peak_label_size = st.slider("Velikost textu:", 8, 24, 12, 1)
+            label_height_offset = st.slider("Výška nad píkem:", 50, 5000, 500, 50)
+            peak_label_rotation = st.slider("Rotace textu:", 0, 90, 90, 15)
+            peak_line_color = st.color_picker("Barva čar:", "#000000")
+            peak_line_alpha = st.slider("Průhlednost čar:", 0.0, 1.0, 0.8, 0.1)
 
-# Map file -> UploadedFile
-upload_map = {f.name: f for f in uploaded_files}
-
-
-# =========================================================
-# WORKFLOW / FILTERS
-# =========================================================
-st.sidebar.header("1. Workflow")
-mode = st.sidebar.radio(
-    "Režim exportu",
-    ["Single figure (cokoliv vybereš)", "Batch po skupinách (ZIP)"],
-    index=1 if ec_detected else 0
-)
-
-with st.sidebar.expander("Rychlé filtry", expanded=True):
-    group_choices = sorted(df_index["group"].unique().tolist())
-    selected_groups = st.multiselect("Skupiny (group)", options=group_choices, default=group_choices)
-
-    label_contains = st.text_input("Label/file obsahuje (regex)", value="")
-    filter_every_mV = st.number_input(
-        "EC filtr: kreslit jen každých N mV (0 = vypnout)",
-        value=100 if ec_detected else 0,
-        step=10
-    )
-
-    df_filtered = df_index.copy()
-    df_filtered = df_filtered[df_filtered["group"].isin(selected_groups)]
-
-    if label_contains.strip():
+    # Zpracování manuálních úprav píků
+    manual_adds = []
+    manual_removes = []
+    
+    if manual_add_str:
         try:
-            rx = re.compile(label_contains.strip())
-            df_filtered = df_filtered[
-                df_filtered["label"].astype(str).str.contains(rx) |
-                df_filtered["file"].astype(str).str.contains(rx)
-            ]
-        except re.error:
-            st.warning("Neplatný regex, filtr ignoruju.")
-
-    # Default include suggestion for EC downsample
-    if filter_every_mV and filter_every_mV > 0 and df_filtered["potential_mV"].notna().any():
-        pot = df_filtered["potential_mV"].astype(float)
-        keep = np.isclose(np.mod(np.abs(pot), float(filter_every_mV)), 0.0, atol=1e-6)
-        if keep.any():
-            df_filtered.loc[~keep, "include"] = False
-
-
-# =========================================================
-# PROCESSING SETTINGS
-# =========================================================
-st.sidebar.header("2. Úpravy dat")
-with st.sidebar.expander("Předzpracování", expanded=True):
-    x_min = st.number_input("X min (cm⁻¹)", value=300, step=10)
-    x_max = st.number_input("X max (cm⁻¹)", value=1800, step=10)
-    invert_x = st.checkbox("Invertovat osu X", value=False)
-
-    do_smooth = st.checkbox("Savitzky–Golay smoothing", value=True)
-    sg_window = st.slider("SG okno (liché)", 5, 51, 11, step=2)
-    sg_poly = st.slider("SG polynom", 2, 5, 3)
-
-    do_baseline = st.checkbox("Baseline korekce (AsLS)", value=False)
-    asls_lam = st.number_input("AsLS λ", value=1.0e6, format="%.2e")
-    asls_p = st.number_input("AsLS p", value=1.0e-3, format="%.2e")
-    asls_niter = st.slider("AsLS iterace", 5, 30, 10)
-
-    do_resample = st.checkbox("Resampling na společnou osu (doporučeno pro stabilní píky)", value=True)
-    x_step = st.number_input("Krok osy (cm⁻¹)", value=1.0, step=0.5)
-
-    # IMPORTANT default: none (to behave like your original unless you turn it on)
-    norm_mode = st.selectbox("Normalizace", ["none", "max", "vector", "peak"], index=0)
-    peak_center = st.number_input("Peak center (cm⁻¹) pro 'peak' normalizaci", value=1082.0, step=1.0)
-    peak_window = st.number_input("Peak window (± cm⁻¹)", value=5.0, step=1.0)
-
-
-# =========================================================
-# LOOK & EXPORT SETTINGS
-# =========================================================
-st.sidebar.header("3. Vzhled a export")
-with st.sidebar.expander("Rozměry a kvalita", expanded=True):
-    col_w, col_h = st.columns(2)
-    with col_w:
-        img_width_px = st.number_input("Šířka (px)", value=1200, step=100)
-    with col_h:
-        img_height_px = st.number_input("Výška (px)", value=1000, step=100)
-    img_dpi = st.number_input("DPI", value=150, step=50)
-
-    figsize_w = img_width_px / img_dpi
-    figsize_h = img_height_px / img_dpi
-    st.caption(f"Matplotlib figsize ≈ {figsize_w:.2f} × {figsize_h:.2f} in")
-
-with st.sidebar.expander("Grafika", expanded=False):
-    palette_name = st.selectbox("Paleta", ["jet", "viridis", "plasma", "inferno", "coolwarm", "bwr", "rainbow"], index=0)
-
-    # KEY FIX: Auto offset so spectra never flatten
-    auto_offset = st.checkbox("Auto offset (doporučeno) — opravuje 'rovné čáry'", value=True)
-    offset_factor = st.slider("Auto offset násobek", 0.05, 5.0, 1.0, 0.05)
-    offset_manual = st.number_input("Offset ručně (použije se jen když Auto offset = OFF)", value=2000.0, step=100.0)
-
-    xlabel_text = st.text_input("Popis osy X", "Ramanův posun (cm⁻¹)")
-    ylabel_text = st.text_input("Popis osy Y", "Intenzita (a.u.)")
-
-    line_width = st.slider("Tloušťka čáry", 0.5, 3.0, 1.5)
-    font_size = st.slider("Velikost písma os", 8, 30, 14)
-
-    show_right_label = st.checkbox("Zobrazit pravý popis osy (např. Potenciál)", value=ec_detected)
-    right_label_text = st.text_input("Text vpravo", "Potenciál")
-    show_arrow = st.checkbox("Šipka (směr série)", value=ec_detected)
-
-    export_svg = st.checkbox("Export SVG", value=True)
-    export_png = st.checkbox("Export PNG", value=True)
-    export_pdf = st.checkbox("Export PDF", value=False)
-
-with st.sidebar.expander("Fonty pro Illustrator", expanded=False):
-    font_family = st.text_input("Font family", value="Arial")
-    svg_fonttype = st.selectbox("SVG: text jako text", ["none", "path"], index=0)
-    pdf_fonttype = st.selectbox("PDF fonttype", ["42 (TrueType)", "3 (Type3)"], index=0)
-
-
-# =========================================================
-# PEAK SETTINGS
-# =========================================================
-st.sidebar.header("4. Píky")
-with st.sidebar.expander("Detekce a popisky", expanded=False):
-    peak_mode = st.selectbox("Režim píků", ["žádné", "auto", "fixní seznam + doladění"], index=2)
-
-    # Auto
-    prominence = st.slider("Auto: prominence", 10, 5000, 200)
-
-    # Fixed
-    fixed_peak_list_str = st.text_area(
-        "Fixní seznam píků (cm⁻¹), oddělené čárkou",
-        value="1613,1598,1515,1497,1398,1365,1291,1230,1211,1182,1076,839,787,747,721,651,639,588,521,469,409,348,239"
-    )
-    fixed_tol = st.slider("Tolerance (± cm⁻¹) pro fixní píky", 1, 20, 4)
-
-    manual_add_str = st.text_input("➕ Přidat píky (např. 1001, 1580)", value="")
-    manual_remove_str = st.text_input("➖ Smazat píky (např. 220)", value="")
-
-    # Visual of labels
-    peak_label_size = st.slider("Velikost písma popisků", 8, 30, 14)
-    show_peak_lines = st.checkbox("Vodící čáry", value=True)
-
-    # KEY FIX: label height should be relative-friendly when normalization is on
-    peak_offset_mode = st.selectbox("Výška popisků", ["relativní (doporučeno)", "absolutní (a.u.)"], index=0)
-    peak_offset_rel = st.slider("Relativní výška (násobek amplitudy)", 0.0, 3.0, 0.6, 0.05)
-    peak_offset_abs = st.number_input("Absolutní výška (a.u.)", value=500.0, step=50.0)
-
-
-def parse_peak_list(s: str) -> List[float]:
-    out = []
-    for part in (s or "").split(","):
-        part = part.strip()
-        if not part:
-            continue
-        try:
-            out.append(float(part))
+            manual_adds = [int(float(x.strip())) for x in manual_add_str.split(',') if x.strip()]
         except ValueError:
-            pass
-    return out
+            st.sidebar.error("❌ Neplatný formát pro přidání píků")
+    
+    if manual_remove_str:
+        try:
+            manual_removes = [int(float(x.strip())) for x in manual_remove_str.split(',') if x.strip()]
+        except ValueError:
+            st.sidebar.error("❌ Neplatný formát pro odstranění píků")
 
-
-manual_adds = parse_peak_list(manual_add_str)
-manual_removes = parse_peak_list(manual_remove_str)
-fixed_peaks = parse_peak_list(fixed_peak_list_str) if peak_mode == "fixní seznam + doladění" else []
-
-
-# =========================================================
-# MAIN TABLE (USER FRIENDLY)
-# =========================================================
-st.subheader("1) Tabulka spekter (edituj group/label/include)")
-st.write("Nejrychlejší workflow: uprav **group** a **label** přímo tady. Funguje pro EC i ne-EC spektra.")
-
-edited = st.data_editor(
-    df_filtered,
-    use_container_width=True,
-    num_rows="fixed",
-    column_config={
-        "include": st.column_config.CheckboxColumn("include"),
-        "group": st.column_config.TextColumn("group"),
-        "label": st.column_config.TextColumn("label"),
-        "potential_mV": st.column_config.NumberColumn("potential_mV", format="%.0f"),
-        "step_mV": st.column_config.NumberColumn("step_mV", format="%.0f"),
-        "file": st.column_config.TextColumn("file"),
-        "type": st.column_config.TextColumn("type"),
-    },
-    disabled=["file", "type", "potential_mV", "step_mV"],
-    key="spectra_table"
-)
-
-selected_df = edited[edited["include"] == True].copy()
-if selected_df.empty:
-    st.warning("Nemáš vybrané žádné spektrum (include = False).")
-    st.stop()
-
-
-# =========================================================
-# LOADING & PROCESSING
-# =========================================================
-def load_spectrum(uploaded_file) -> Tuple[np.ndarray, np.ndarray, str]:
-    suffix = uploaded_file.name.split(".")[-1].lower()
-    if suffix == "txt":
-        x, y = load_txt_bytes(uploaded_file.getvalue())
-        return x, y, "OK (.txt)"
-    if suffix == "wdf":
-        got = try_load_wdf(uploaded_file)
-        if got is None:
-            return np.array([]), np.array([]), "NELZE načíst .wdf (nainstaluj renishawWiRE / renishaw-wdf / ramanspy)"
-        x, y, msg = got
-        return x, y, msg
-    return np.array([]), np.array([]), "Nepodporovaný formát"
-
-
-def preprocess(x: np.ndarray, y: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-    xmin = min(float(x_min), float(x_max))
-    xmax = max(float(x_min), float(x_max))
-
-    m = (x >= xmin) & (x <= xmax)
-    if np.any(m):
-        x = x[m]
-        y = y[m]
-
-    idx = np.argsort(x)
-    x = x[idx]
-    y = y[idx]
-
-    if do_baseline and len(y) > 10:
-        bl = baseline_asls(y, lam=float(asls_lam), p=float(asls_p), niter=int(asls_niter))
-        y = y - bl
-
-    if do_smooth and len(y) > int(sg_window):
-        y = savgol_filter(y, int(sg_window), int(sg_poly))
-
-    return x, y
-
-
-def build_common_grid(all_x: List[np.ndarray]) -> Optional[np.ndarray]:
-    if not do_resample:
-        return None
-    xmin = max(np.min(x) for x in all_x)
-    xmax = min(np.max(x) for x in all_x)
-    if xmin >= xmax:
-        return None
-    step = float(x_step) if float(x_step) > 0 else 1.0
-    return np.arange(math.floor(xmin), math.ceil(xmax) + step, step)
-
-
-loaded = []
-status_lines = []
-for row in selected_df.itertuples(index=False):
-    uf = upload_map.get(row.file)
-    if uf is None:
-        continue
-
-    x, y, status = load_spectrum(uf)
-    if x.size == 0 or y.size == 0:
-        status_lines.append(f"❌ {row.file}: {status}")
-        continue
-
-    x, y = preprocess(x, y)
-
-    loaded.append({
-        "file": row.file,
-        "group": row.group,
-        "label": row.label,
-        "potential_mV": row.potential_mV,
-        "x": x,
-        "y": y
-    })
-    status_lines.append(f"✅ {row.file}: {status}")
-
-with st.expander("Stav načtení souborů", expanded=False):
-    st.write("\n".join(status_lines))
-
-if not loaded:
-    st.error("Nepovedlo se načíst žádná data.")
-    st.stop()
-
-common_x = build_common_grid([d["x"] for d in loaded])
-
-for d in loaded:
-    x, y = d["x"], d["y"]
-    if common_x is not None and len(common_x) > 10:
-        y = resample_to_grid(x, y, common_x)
-        x = common_x
-
-    y = normalize_y(x, y, mode=norm_mode, peak_center=float(peak_center), peak_window=float(peak_window))
-
-    d["x"], d["y"] = x, y
-
-
-# =========================================================
-# PEAK COMPUTATION
-# =========================================================
-def compute_peak_positions(x: np.ndarray, y: np.ndarray) -> List[float]:
-    positions = []
-
-    if peak_mode == "žádné":
-        return positions
-
-    if peak_mode == "auto":
-        idxs, _ = find_peaks(y, prominence=float(prominence), distance=30)
-        positions.extend([float(x[i]) for i in idxs])
-
-    if peak_mode == "fixní seznam + doladění":
-        for pk in fixed_peaks:
-            hit = local_max_near(x, y, pk, tol=float(fixed_tol))
-            if hit:
-                positions.append(hit[0])
-
-    # Manual adds (snap to local max)
-    for pk in manual_adds:
-        idx = find_nearest_idx(x, pk)
-        w = 10
-        s = max(0, idx - w)
-        e = min(len(x), idx + w + 1)
-        best = s + int(np.argmax(y[s:e]))
-        positions.append(float(x[best]))
-
-    # Manual removes
-    cleaned = []
-    for pos in positions:
-        if any(abs(pos - r) < 15 for r in manual_removes):
-            continue
-        cleaned.append(pos)
-
-    cleaned = sorted(set([round(p, 3) for p in cleaned]))
-    return cleaned
-
-
-# =========================================================
-# INTERACTIVE PREVIEW (PLOTLY)
-# =========================================================
-with st.expander("🔍 Interaktivní náhled (Plotly)", expanded=False):
-    fig_int = go.Figure()
-
-    cmap = plt.get_cmap(palette_name)
-    colors = cmap(np.linspace(0, 1, len(loaded)))
-    plotly_colors = [mcolors.to_hex(c) for c in colors]
-
-    # Sort: by potential desc if present, else by label
-    has_pot = any(d["potential_mV"] is not None and not pd.isna(d["potential_mV"]) for d in loaded)
-    if has_pot:
-        loaded_sorted = sorted(loaded, key=lambda z: float(z["potential_mV"]) if z["potential_mV"] is not None else -1e9, reverse=True)
-    else:
-        loaded_sorted = sorted(loaded, key=lambda z: str(z["label"]))
-
-    # KEY FIX: compute offset scale from real data AFTER preprocessing/normalization
-    amp = compute_auto_offset(loaded_sorted)
-    offset_plot = (amp * float(offset_factor)) if auto_offset else float(offset_manual)
-
-    n = len(loaded_sorted)
-    for i, d in enumerate(loaded_sorted):
-        x = d["x"]
-        y = d["y"] + (n - 1 - i) * offset_plot  # top curve stays on top
-        fig_int.add_trace(go.Scatter(
-            x=x, y=y,
-            mode="lines",
-            name=str(d["label"]),
-            line=dict(color=plotly_colors[i])
-        ))
-
-    fig_int.update_layout(
-        height=500,
-        xaxis_title=xlabel_text,
-        yaxis_title=ylabel_text,
-        hovermode="x unified",
-        template="plotly_dark",
-        xaxis=dict(autorange="reversed" if invert_x else True)
-    )
-    st.plotly_chart(fig_int, use_container_width=True)
-
-
-# =========================================================
-# MATPLOTLIB EXPORT
-# =========================================================
-def fig_to_bytes(fig: plt.Figure, fmt: str) -> bytes:
-    bio = io.BytesIO()
-    fig.savefig(bio, format=fmt, bbox_inches="tight", dpi=img_dpi)
-    bio.seek(0)
-    return bio.getvalue()
-
-
-def make_matplotlib_figure(curves: List[Dict[str, Any]], title: str = "") -> plt.Figure:
-    # Illustrator-friendly
-    plt.rcParams["font.family"] = font_family
-    plt.rcParams["font.size"] = font_size
-    plt.rcParams["axes.linewidth"] = 1.5
-    plt.rcParams["svg.fonttype"] = svg_fonttype
-    plt.rcParams["pdf.fonttype"] = 42 if "42" in pdf_fonttype else 3
-
-    fig, ax = plt.subplots(figsize=(figsize_w, figsize_h), dpi=img_dpi)
-
-    # Reserve right margin for colored labels + optional right ylabel + arrow
-    # (prevents overlaps and keeps consistent publication layout)
-    fig.tight_layout(rect=[0.0, 0.0, 0.84, 1.0])
-
-    ax.set_xlabel(xlabel_text)
-    ax.set_ylabel(ylabel_text)
-    ax.set_yticks([])
-
-    if title:
-        ax.set_title(title)
-
-    cmap = plt.get_cmap(palette_name)
-    mpl_colors = cmap(np.linspace(0, 1, len(curves)))
-
-    # Sort: potential desc if present; otherwise keep user order (table)
-    has_pot = any(c.get("potential_mV") is not None and not pd.isna(c.get("potential_mV")) for c in curves)
-    if has_pot:
-        curves = sorted(curves, key=lambda z: float(z["potential_mV"]) if z["potential_mV"] is not None else -1e9, reverse=True)
-
-    # KEY FIX: Auto offset based on amplitude
-    amp = compute_auto_offset(curves)
-    offset_plot = (amp * float(offset_factor)) if auto_offset else float(offset_manual)
-
-    # Peak label vertical offset
-    if peak_offset_mode.startswith("relativní"):
-        peak_y_offset = float(peak_offset_rel) * amp
-    else:
-        peak_y_offset = float(peak_offset_abs)
-
-    # Compute peak positions from top curve (after sorting)
-    top = curves[0]
-    peak_positions = compute_peak_positions(top["x"], top["y"])
-
-    n = len(curves)
-
-    for i, c in enumerate(curves):
-        x = c["x"]
-        y = c["y"] + (n - 1 - i) * offset_plot  # keep first curve on top
-
-        ax.plot(x, y, color=mpl_colors[i], lw=float(line_width))
-
-        # Right-side colored label (outside axes)
-        trans = ax.get_yaxis_transform()
-        y_lbl = y[0] if invert_x else y[-1]
-        ax.text(
-            1.01, y_lbl, str(c["label"]),
-            color=mpl_colors[i],
-            va="center", ha="left",
-            fontsize=font_size,
-            fontweight="bold",
-            transform=trans,
-            clip_on=False
+    # --- EXPORT A DÁVKOVÉ ZPRACOVÁNÍ ---
+    st.sidebar.header("4️⃣ Export")
+    
+    with st.sidebar.expander("💾 Nastavení exportu", expanded=False):
+        export_formats = st.multiselect(
+            "Formáty k exportu:",
+            ["SVG (vektorový)", "PNG (rastrový)", "PDF (tisk)"],
+            default=["SVG (vektorový)", "PNG (rastrový)"]
         )
+        
+        auto_filename = st.checkbox("Automatický název souboru", value=True)
+        if not auto_filename:
+            custom_filename = st.text_input("Název souboru:", "SERS_output")
+        else:
+            custom_filename = f"SERS_{len(final_data_list)}spectra"
 
-        # Peaks only on top trace (i==0)
-        if i == 0 and peak_positions and peak_mode != "žádné":
-            for px in peak_positions:
-                idx = find_nearest_idx(x, px)
-                py = y[idx]
-                if show_peak_lines:
-                    ax.plot([px, px], [py + 0.02 * amp, py + peak_y_offset - 0.02 * amp],
-                            color="black", lw=0.5, alpha=0.8)
-                ax.text(px, py + peak_y_offset, f"{int(round(px))}",
-                        rotation=90, ha="center", va="bottom",
-                        fontsize=int(peak_label_size))
-
-    # X limits + invert
-    xmin = min(float(x_min), float(x_max))
-    xmax = max(float(x_min), float(x_max))
-    ax.set_xlim(xmax, xmin) if invert_x else ax.set_xlim(xmin, xmax)
-
-    # Clean spines
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-
-    # Optional right ylabel + arrow, positioned beyond labels
-    if show_right_label:
-        axr = ax.twinx()
-        axr.set_ylabel(right_label_text)
-        axr.set_yticks([])
-        axr.spines["top"].set_visible(False)
-        axr.spines["left"].set_visible(False)
-        axr.spines["right"].set_visible(False)
-        axr.yaxis.set_label_coords(1.14, 0.5)
-
-    if show_arrow:
-        ax.annotate(
-            "",
-            xy=(1.17, 0.05), xytext=(1.17, 0.95),
-            xycoords="axes fraction",
-            arrowprops=dict(arrowstyle="-|>", lw=3),
-        )
-
-    return fig
-
-
-# =========================================================
-# OUTPUT
-# =========================================================
-st.subheader("2) Finální výstup")
-
-curves_all = loaded
-
-if mode.startswith("Single"):
-    fig = make_matplotlib_figure(curves_all)
-    st.pyplot(fig)
-
-    col1, col2, col3 = st.columns(3)
-
-    if export_svg:
-        svg_bytes = fig_to_bytes(fig, "svg")
-        col1.download_button("📥 SVG (vektor)", svg_bytes, file_name="SERS_output.svg", mime="image/svg+xml")
-
-    if export_png:
-        png_bytes = fig_to_bytes(fig, "png")
-        col2.download_button(f"📥 PNG ({img_width_px}×{img_height_px})", png_bytes, file_name="SERS_output.png", mime="image/png")
-
-    if export_pdf:
-        pdf_bytes = fig_to_bytes(fig, "pdf")
-        col3.download_button("📥 PDF (vektor)", pdf_bytes, file_name="SERS_output.pdf", mime="application/pdf")
-
-    plt.close(fig)
+    # --- VYKRESLOVÁNÍ ---
+    if final_data_list and len(final_data_list) > 0:
+        
+        # Příprava barev
+        cmap = plt.get_cmap(palette_name)
+        if reverse_colors:
+            cmap = cmap.reversed()
+        mpl_colors = cmap(np.linspace(0, 1, len(final_data_list)))
+        plotly_colors = [mcolors.to_hex(c) for c in mpl_colors]
+        
+        # --- INTERAKTIVNÍ NÁHLED ---
+        with st.expander("🔍 Interaktivní náhled (Plotly)", expanded=False):
+            fig_int = go.Figure()
+            
+            for i, item in enumerate(final_data_list):
+                x, y = load_data(item['file'])
+                if x is None:
+                    continue
+                
+                # Filtrace rozsahu
+                mask = (x >= x_range[0]) & (x <= x_range[1])
+                x_c, y_c = x[mask], y[mask]
+                
+                # Baseline korekce
+                if apply_baseline:
+                    if "ALS" in baseline_method:
+                        baseline = baseline_als(y_c, lam=baseline_lam, p=baseline_p, niter=baseline_niter)
+                    elif "Polynom" in baseline_method:
+                        baseline = baseline_polynomial(y_c, degree=baseline_degree)
+                    else:  # Rolling Ball
+                        baseline = baseline_rolling_ball(y_c, window_size=baseline_window)
+                    
+                    y_c = y_c - baseline
+                
+                # Vyhlazení
+                if smooth_spectra and len(y_c) > smooth_window:
+                    y_c = savgol_filter(y_c, smooth_window, smooth_poly)
+                
+                # Normalizace
+                if apply_normalization:
+                    if "Maximum" in norm_method:
+                        y_c = normalize_spectrum(y_c, method='max') * norm_scale
+                    elif "Plocha" in norm_method:
+                        y_c = normalize_spectrum(y_c, method='area') * norm_scale
+                    else:  # Min-Max
+                        y_c = normalize_spectrum(y_c, method='minmax') * norm_scale
+                
+                # Offset
+                y_s = y_c + (i * offset_val)
+                
+                # Popisek
+                label = item.get('display_label', item['filename'])
+                
+                fig_int.add_trace(go.Scatter(
+                    x=x_c,
+                    y=y_s,
+                    mode='lines',
+                    name=label,
+                    line=dict(color=plotly_colors[i], width=line_width),
+                    hovertemplate=f'<b>{label}</b><br>x=%{{x:.1f}}<br>y=%{{y:.1f}}<extra></extra>'
+                ))
+            
+            fig_int.update_layout(
+                height=600,
+                xaxis_title=xlabel_text,
+                yaxis_title=ylabel_text,
+                hovermode="x unified",
+                template="plotly_white",
+                xaxis=dict(autorange="reversed" if invert_x else True),
+                font=dict(size=font_size),
+                showlegend=True,
+                legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01)
+            )
+            
+            st.plotly_chart(fig_int, use_container_width=True)
+        
+        # --- FINÁLNÍ STATICKÝ GRAF ---
+        st.subheader("📊 Finální Graf pro Export")
+        
+        # Nastavení matplotlib
+        plt.rcParams['font.family'] = 'Arial'
+        plt.rcParams['svg.fonttype'] = 'none'
+        plt.rcParams['pdf.fonttype'] = 42
+        plt.rcParams['font.size'] = font_size
+        plt.rcParams['axes.linewidth'] = axis_line_width
+        
+        # Vytvoření figury
+        fig, ax = plt.subplots(figsize=(figsize_w, figsize_h), dpi=img_dpi)
+        
+        # Určení spektra pro píky
+        peak_indices = []
+        if peak_target == "Nejvyšší spektrum":
+            peak_indices = [len(final_data_list) - 1]
+        elif peak_target == "Nejnižší spektrum":
+            peak_indices = [0]
+        elif peak_target == "Všechna spektra":
+            peak_indices = list(range(len(final_data_list)))
+        elif peak_target == "Konkrétní spektrum" and 'peak_spectrum_idx' in locals():
+            peak_indices = [peak_spectrum_idx]
+        
+        # Vykreslení spekter
+        for i, item in enumerate(final_data_list):
+            x, y = load_data(item['file'])
+            if x is None:
+                st.warning(f"⚠️ Nepodařilo se načíst soubor: {item['filename']}")
+                continue
+            
+            # Filtrace rozsahu
+            mask = (x >= x_range[0]) & (x <= x_range[1])
+            x_c, y_c = x[mask], y[mask]
+            
+            # Baseline korekce
+            baseline = None
+            if apply_baseline:
+                if "ALS" in baseline_method:
+                    baseline = baseline_als(y_c, lam=baseline_lam, p=baseline_p, niter=baseline_niter)
+                elif "Polynom" in baseline_method:
+                    baseline = baseline_polynomial(y_c, degree=baseline_degree)
+                else:  # Rolling Ball
+                    baseline = baseline_rolling_ball(y_c, window_size=baseline_window)
+                
+                y_c = y_c - baseline
+            
+            # Vyhlazení (po baseline korekci)
+            if smooth_spectra and len(y_c) > smooth_window:
+                y_c = savgol_filter(y_c, smooth_window, smooth_poly)
+            
+            # Normalizace
+            if apply_normalization:
+                if "Maximum" in norm_method:
+                    y_c = normalize_spectrum(y_c, method='max') * norm_scale
+                elif "Plocha" in norm_method:
+                    y_c = normalize_spectrum(y_c, method='area') * norm_scale
+                else:  # Min-Max
+                    y_c = normalize_spectrum(y_c, method='minmax') * norm_scale
+            
+            # Offset
+            y_s = y_c + (i * offset_val)
+            
+            # Vykreslení spektra
+            ax.plot(x_c, y_s, color=mpl_colors[i], lw=line_width)
+            
+            # Náhled baseline (pokud je zapnut)
+            if apply_baseline and show_baseline_preview and baseline is not None:
+                baseline_shifted = baseline + (i * offset_val)
+                ax.plot(x_c, baseline_shifted, color=mpl_colors[i], lw=0.5, linestyle='--', alpha=0.5)
+            
+            # Popisek spektra
+            label = item.get('display_label', item['filename'])
+            
+            if label_position == "Vpravo":
+                trans = ax.get_yaxis_transform()
+                y_lbl = y_s[0] if invert_x else y_s[-1]
+                ax.text(
+                    1.02, y_lbl, label,
+                    color=mpl_colors[i],
+                    va='center',
+                    ha='left',
+                    fontsize=font_size,
+                    fontweight='bold',
+                    transform=trans,
+                    clip_on=False
+                )
+            else:  # Uvnitř grafu
+                x_pos = x_c[-1] if not invert_x else x_c[0]
+                ax.text(
+                    x_pos, y_s[-1 if not invert_x else 0],
+                    label,
+                    color=mpl_colors[i],
+                    va='center',
+                    ha='right' if not invert_x else 'left',
+                    fontsize=font_size,
+                    fontweight='bold'
+                )
+            
+            # Vykreslení píků
+            if i in peak_indices:
+                final_peaks = []
+                
+                # Automatická detekce
+                if use_auto_peaks:
+                    peaks, _ = find_peaks(y_s, prominence=prominence, distance=min_distance)
+                    final_peaks.extend(peaks)
+                
+                # Manuální přidání
+                for user_x in manual_adds:
+                    idx = find_nearest_idx(x_c, user_x)
+                    search_window = 10
+                    start = max(0, idx - search_window)
+                    end = min(len(x_c), idx + search_window)
+                    
+                    if start < end:
+                        local_max_idx = start + np.argmax(y_s[start:end])
+                        # Zamezení duplikátů
+                        if not any(abs(existing - local_max_idx) < 5 for existing in final_peaks):
+                            final_peaks.append(local_max_idx)
+                
+                # Odstranění manuálně vyřazených píků
+                valid_peaks = [
+                    p for p in final_peaks
+                    if not any(abs(x_c[p] - remove_x) < 15 for remove_x in manual_removes)
+                ]
+                
+                # Vykreslení označení píků
+                for peak_idx in valid_peaks:
+                    px, py = x_c[peak_idx], y_s[peak_idx]
+                    
+                    # Vodící čára
+                    if show_peak_lines:
+                        ax.plot(
+                            [px, px],
+                            [py + 50, py + label_height_offset - 50],
+                            color=peak_line_color,
+                            lw=0.5,
+                            alpha=peak_line_alpha
+                        )
+                    
+                    # Popisek píku
+                    ax.text(
+                        px,
+                        py + label_height_offset,
+                        f"{int(px)}",
+                        rotation=peak_label_rotation,
+                        ha='center',
+                        va='bottom',
+                        fontsize=peak_label_size,
+                        color=peak_line_color
+                    )
+        
+        # Nastavení os
+        ax.set_xlabel(xlabel_text, fontweight='bold')
+        ax.set_ylabel(ylabel_text, fontweight='bold')
+        
+        if invert_x:
+            ax.set_xlim(x_range[1], x_range[0])
+        else:
+            ax.set_xlim(x_range[0], x_range[1])
+        
+        # Skrytí některých prvků
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.set_yticks([])
+        
+        # Mřížka
+        if show_grid:
+            ax.grid(True, alpha=0.3, linestyle='--')
+        
+        # Zobrazení grafu
+        st.pyplot(fig)
+        
+        # --- EXPORT ---
+        st.subheader("💾 Stažení Výstupů")
+        
+        export_cols = st.columns(len(export_formats))
+        
+        for idx, fmt in enumerate(export_formats):
+            with export_cols[idx]:
+                if "SVG" in fmt:
+                    svg_io = io.BytesIO()
+                    plt.savefig(svg_io, format='svg', bbox_inches='tight', dpi=img_dpi)
+                    svg_io.seek(0)
+                    st.download_button(
+                        "📥 Stáhnout SVG",
+                        svg_io,
+                        f"{custom_filename}.svg",
+                        "image/svg+xml",
+                        use_container_width=True
+                    )
+                
+                elif "PNG" in fmt:
+                    png_io = io.BytesIO()
+                    plt.savefig(png_io, format='png', bbox_inches='tight', dpi=img_dpi)
+                    png_io.seek(0)
+                    st.download_button(
+                        "📥 Stáhnout PNG",
+                        png_io,
+                        f"{custom_filename}.png",
+                        "image/png",
+                        use_container_width=True
+                    )
+                
+                elif "PDF" in fmt:
+                    pdf_io = io.BytesIO()
+                    plt.savefig(pdf_io, format='pdf', bbox_inches='tight', dpi=img_dpi)
+                    pdf_io.seek(0)
+                    st.download_button(
+                        "📥 Stáhnout PDF",
+                        pdf_io,
+                        f"{custom_filename}.pdf",
+                        "application/pdf",
+                        use_container_width=True
+                    )
+        
+        plt.close(fig)
+        
+        # Statistiky
+        with st.expander("📊 Statistiky a Metadata", expanded=False):
+            st.write("### Informace o grafu")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Počet spekter", len(final_data_list))
+            with col2:
+                st.metric("Rozsah X", f"{x_range[0]}-{x_range[1]} cm⁻¹")
+            with col3:
+                st.metric("Offset", f"{offset_val} a.u.")
+            
+            st.write("### Seznam zpracovaných souborů")
+            for i, item in enumerate(final_data_list):
+                st.text(f"{i+1}. {item['filename']} → {item.get('display_label', 'N/A')}")
+    
+    elif uploaded_files and len(final_data_list) == 0:
+        st.warning("⚠️ Nebyla vybrána žádná spektra k zobrazení. Upravte filtry nebo výběr v postranním panelu.")
 
 else:
-    st.write("Batch režim: pro každou skupinu (group) se vyrobí samostatná figura a stáhneš ZIP.")
-    grouped: Dict[str, List[Dict[str, Any]]] = {}
-    for d in curves_all:
-        grouped.setdefault(d["group"], []).append(d)
-
-    out_files: Dict[str, bytes] = {}
-    for gname, curves in grouped.items():
-        fig = make_matplotlib_figure(curves, title=str(gname))
-        if export_svg:
-            out_files[f"{gname}.svg"] = fig_to_bytes(fig, "svg")
-        if export_png:
-            out_files[f"{gname}.png"] = fig_to_bytes(fig, "png")
-        if export_pdf:
-            out_files[f"{gname}.pdf"] = fig_to_bytes(fig, "pdf")
-        plt.close(fig)
-
-    zip_bytes = build_zip(out_files)
-
-    st.download_button(
-        "📦 Stáhnout ZIP se všemi figurami",
-        data=zip_bytes,
-        file_name="SERS_figures.zip",
-        mime="application/zip"
-    )
-
-    with st.expander("Rychlý preview (první 3 skupiny)", expanded=False):
-        for gname in list(grouped.keys())[:3]:
-            st.markdown(f"**{gname}**")
-            fig = make_matplotlib_figure(grouped[gname], title=str(gname))
-            st.pyplot(fig)
-            plt.close(fig)
-
-
-# =========================================================
-# WDF HELP
-# =========================================================
-with st.expander("ℹ️ .wdf podpora (pokud chceš)", expanded=False):
-    st.markdown(
-        """
-Pokud chceš načítat **.wdf** přímo z WiRE, doinstaluj jednu z knihoven:
-
-- `pip install renishawWiRE`
-- nebo `pip install renishaw-wdf`
-- nebo `pip install ramanspy`
-
-Appka poběží i bez toho – jen pro `.txt`.
-"""
-    )
+    # Uvítací obrazovka
+    st.info("""
+    ### 👋 Vítejte v SERS Plotter v12.1!
+    
+    **Jak začít:**
+    1. Nahrajte .txt soubory s vašimi Ramanovými spektry
+    2. Vyberte režim práce (napěťové série, obecná spektra, nebo pokročilý)
+    3. Aplikujte baseline korekci a normalizaci (podle potřeby)
+    4. Upravte vzhled a označte píky podle potřeby
+    5. Uložte nastavení jako šablonu pro budoucí použití
+    6. Exportujte finální graf v požadovaném formátu
+    
+    **Nové funkce v12.1:**
+    - 💾 **Šablony** - ukládání a sdílení nastavení
+    - 🔬 **Baseline korekce** - odstranění fluorescenčního pozadí (ALS, Polynom, Rolling Ball)
+    - 📊 **Normalizace** - sjednocení intenzit pro lepší porovnání
+    - 🎯 Tři režimy práce pro různé typy spekter
+    - 🎨 Pokročilé možnosti stylování
+    - 📍 Flexibilní správa píků
+    - 💾 Export do více formátů najednou
+    - 🔍 Interaktivní náhled před exportem
+    
+    **Podporované formáty:**
+    - `.txt` soubory se dvěma sloupci (x, y) oddělenými mezerou nebo tabulátorem
+    
+    **Tip:** Pro nejlepší výsledky použijte data se správně pojmenovanými soubory 
+    (např. `sample_100mV.txt`, `sample_-200mV_reverse.txt`)
+    """)
+    
+    # Rychlá nápověda
+    with st.expander("📚 Podrobná dokumentace", expanded=False):
+        st.markdown("""
+        ### Režimy práce
+        
+        **📊 Spektra s napětím:**
+        - Optimalizováno pro napěťové série (0 mV až -1000 mV atd.)
+        - Automatická detekce napětí z názvu souboru
+        - Možnost filtrování dopředného/zpětného skenu
+        - Rychlý výběr podle kroku (např. každých 100 mV)
+        
+        **📈 Obecná spektra:**
+        - Pro jakákoliv spektra bez napětí
+        - Flexibilní systém pojmenování
+        - Vlastní nebo automatické popisky
+        
+        **🔧 Pokročilý režim:**
+        - Kombinuje všechny funkce
+        - Maximální kontrola nad každým aspektem
+        - Vhodné pro zkušené uživatele
+        
+        ### Baseline korekce
+        
+        **ALS (Asymmetric Least Squares):**
+        - Nejlepší pro fluorescenční pozadí
+        - λ (lambda): Vyhlazení baseline - vyšší hodnota = hladší křivka
+        - p (asymetrie): Jak moc se baseline přizpůsobí minimům vs. maximům
+        - Doporučené hodnoty: λ=1,000,000, p=0.01
+        
+        **Polynomiální:**
+        - Rychlá metoda pro jednoduché pozadí
+        - Stupeň 2-3 pro mírně zakřivené pozadí, 4-6 pro složitější
+        
+        **Rolling Ball:**
+        - Simuluje kulující se kouli pod spektrem
+        - Vhodné pro jednoduché, plynulé pozadí
+        
+        ### Normalizace
+        
+        **Maximum = 1:**
+        - Nejjednodušší metoda
+        - Všechna spektra mají stejnou maximální intenzitu
+        
+        **Plocha = 1:**
+        - Pro kvantitativní porovnání
+        - Zachovává relativní intenzity píků
+        
+        **Min-Max (0-1):**
+        - Roztáhne celé spektrum na rozsah 0-1
+        - Může zvýraznit slabé signály
+        
+        ### Šablony
+        
+        - 💾 Uložte aktuální nastavení pro opakované použití
+        - 📥 Exportujte všechny šablony do JSON souboru
+        - 📤 Sdílejte šablony s kolegy importem JSON
+        - 🔄 Rychlé přepínání mezi různými nastaveními
+        
+        ### Detekce píků
+        
+        **Automatická detekce:**
+        - Používá algoritmus `scipy.signal.find_peaks`
+        - Parametr "Citlivost" určuje minimální výšku píku
+        - "Minimální vzdálenost" zabraňuje detekci duplicitních píků
+        
+        **Manuální úpravy:**
+        - Přidat: zadejte pozice píků oddělené čárkou
+        - Odstranit: zadejte pozice píků k odstranění
+        - Aplikuje se vyhledávání lokálního maxima
+        
+        ### Tipy pro publikace
+        
+        1. **DPI:** Pro publikace používejte min. 300 DPI
+        2. **Formát:** SVG je ideální pro další úpravy v Illustratoru
+        3. **Barvy:** Pro černobílý tisk zvolte paletu "viridis" nebo "plasma"
+        4. **Offset:** Nastavte tak, aby se spektra nepřekrývala, ale nebyla příliš daleko
+        5. **Vyhlazení:** Zapněte pro hladší vzhled, ale ověřte, že nezkresluje data
+        6. **Baseline:** Použijte ALS pro odstranění fluorescence před měřením píků
+        7. **Normalizace:** Normalizujte před porovnáním intenzit mezi různými měřeními
+        
+        ### Pracovní postup
+        
+        1. Nahrajte soubory
+        2. Aplikujte baseline korekci (pokud je třeba)
+        3. Normalizujte spektra (pokud chcete srovnat intenzity)
+        4. Vyhlaďte data
+        5. Nastavte offset a rozsah
+        6. Označte píky
+        7. Uložte nastavení jako šablonu
+        8. Exportujte graf
+        """)
