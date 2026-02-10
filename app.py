@@ -443,7 +443,17 @@ if uploaded_files:
         # Výběr spekter
         options = [s['label'] for s in processed_batch]
         default_selection = [s['label'] for s in processed_batch if abs(s['raw_volts']) % auto_step == 0]
+
+        # --- FIX: Streamlit multiselect nesmí mít default hodnoty, které nejsou v options ---
+        prev = st.session_state.get("voltage_selection", [])
+        safe_default = [x for x in prev if x in options]
         
+        if not safe_default:
+            safe_default = default_selection if default_selection else options
+        
+        st.session_state.voltage_selection = safe_default
+
+    
         # Rychlé akce
         st.write("### 🎯 Výběr Spekter")
         col1, col2, col3, col4 = st.columns(4)
