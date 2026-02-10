@@ -71,9 +71,15 @@ def normalize_spectrum(y, method='max'):
         method: 'max' (na maximum), 'area' (na plochu), 'minmax' (na rozsah 0-1)
     """
     if method == 'max':
-        return y / np.max(y) if np.max(y) != 0 else y
+        max_val = np.max(y)
+        return y / max_val if max_val != 0 else y
     elif method == 'area':
-        area = np.trapz(np.abs(y))
+        # Použijeme np.trapezoid (nová verze) nebo fallback na ruční výpočet
+        try:
+            area = np.trapezoid(np.abs(y))
+        except AttributeError:
+            # Fallback pro starší NumPy verze
+            area = np.sum(np.abs(y))
         return y / area if area != 0 else y
     elif method == 'minmax':
         min_val, max_val = np.min(y), np.max(y)
@@ -104,16 +110,44 @@ def load_data(uploaded_file):
     """Načte data z txt souboru."""
     try:
         uploaded_file.seek(0)
-        df = pd.read_csv(uploaded_file, sep=r'\s+', header=None, engine='python')
+        
+        # Pokus o načtení s různými separátory
+        try:
+            # Pokus 1: mezera nebo tabulátor
+            df = pd.read_csv(uploaded_file, sep=r'\s+', header=None, engine='python')
+        except:
+            # Pokus 2: čárka
+            uploaded_file.seek(0)
+            df = pd.read_csv(uploaded_file, sep=',', header=None, engine='python')
+        
+        # Validace - musí mít alespoň 2 sloupce
+        if df.shape[1] < 2:
+            st.error(f"Soubor {uploaded_file.name} nemá dostatečný počet sloupců (potřeba min. 2)")
+            return None, None
+        
+        # Vezmeme první dva sloupce
         df = df.iloc[:, :2]
         df.columns = ['x', 'y']
+        
+        # Konverze na numerické hodnoty
         df['x'] = pd.to_numeric(df['x'], errors='coerce')
         df['y'] = pd.to_numeric(df['y'], errors='coerce')
+        
+        # Odstranění NaN
         df = df.dropna()
+        
+        # Kontrola jestli máme data
+        if len(df) == 0:
+            st.error(f"Soubor {uploaded_file.name} neobsahuje platná numerická data")
+            return None, None
+        
+        # Seřazení podle X
         df = df.sort_values(by='x')
+        
         return df['x'].values, df['y'].values
+        
     except Exception as e:
-        st.error(f"Chyba při načítání souboru: {e}")
+        st.error(f"Chyba při načítání souboru {uploaded_file.name}: {str(e)}")
         return None, None
 
 def find_nearest_idx(array, value):
@@ -373,9 +407,9 @@ if uploaded_files:
             new_item['volts'] = final_volts
             
             # Generování popisku podle zvoleného formátu
-            if label_format_mode == "Název souboru":
+            if "Název souboru" in label_format_mode:
                 new_item['label'] = Path(item['filename']).stem
-            elif label_format_mode == "Vlastní šablona" and label_template:
+            elif "Vlastní šablona" in label_format_mode and label_template:
                 label = label_template.replace("{voltage}", str(final_volts))
                 label = label.replace("{filename}", Path(item['filename']).stem)
                 new_item['label'] = label
@@ -388,6 +422,17 @@ if uploaded_files:
         processed_batch.sort(key=lambda x: x['volts'])
         if stack_order == "Od Max do 0":
             processed_batch.reverse()
+        
+        # Reset selection pokud se změnil formát popisků
+        current_label_key = f"{label_format_mode}_{force_minus}"
+        if 'prev_label_format' not in st.session_state:
+            st.session_state.prev_label_format = current_label_key
+        
+        if st.session_state.prev_label_format != current_label_key:
+            st.session_state.prev_label_format = current_label_key
+            if 'voltage_selection' in st.session_state:
+                # Aktualizovat výběr s novými popisky
+                st.session_state.voltage_selection = [s['label'] for s in processed_batch if abs(s['raw_volts']) % auto_step == 0]
         
         # Výběr spekter
         options = [s['label'] for s in processed_batch]
@@ -475,6 +520,14 @@ if uploaded_files:
                     )
                     st.session_state.custom_labels[item['filename']] = new_label
                     item['display_label'] = new_label
+        
+        # Reset selection pokud se změnil typ popisků
+        if 'prev_label_mode_general' not in st.session_state:
+            st.session_state.prev_label_mode_general = label_mode
+        
+        if st.session_state.prev_label_mode_general != label_mode:
+            st.session_state.general_selection = [item['display_label'] for item in all_files_meta]
+            st.session_state.prev_label_mode_general = label_mode
         
         # Výběr spekter
         options = [item['display_label'] for item in all_files_meta]
@@ -586,9 +639,9 @@ if uploaded_files:
                         item['volts'] = final_volts
                         
                         # Generování popisku
-                        if adv_label_format == "Název souboru":
+                        if "Název souboru" in adv_label_format:
                             item['display_label'] = Path(item['filename']).stem
-                        elif adv_label_format == "Vlastní šablona" and adv_label_template:
+                        elif "Vlastní šablona" in adv_label_format and adv_label_template:
                             label = adv_label_template.replace("{voltage}", str(final_volts))
                             label = label.replace("{filename}", Path(item['filename']).stem)
                             item['display_label'] = label
@@ -613,6 +666,17 @@ if uploaded_files:
             # Aplikace řazení
             if sort_mode == "Podle názvu":
                 all_files_meta.sort(key=lambda x: x['filename'])
+        
+        # Reset selection pokud se změnil režim nebo typ popisků
+        current_mode_key = f"{use_voltage_mode}_{label_mode if not use_voltage_mode else adv_label_format if use_voltage_mode else 'default'}"
+        if 'prev_mode_advanced' not in st.session_state:
+            st.session_state.prev_mode_advanced = current_mode_key
+        
+        if st.session_state.prev_mode_advanced != current_mode_key:
+            # Reset výběru při změně módu
+            st.session_state.prev_mode_advanced = current_mode_key
+            if 'advanced_selection' in st.session_state:
+                del st.session_state.advanced_selection
         
         # Výběr spekter
         options = [item['display_label'] for item in all_files_meta]
