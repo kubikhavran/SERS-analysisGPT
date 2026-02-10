@@ -63,35 +63,38 @@ def baseline_rolling_ball(y, window_size=50):
     baseline = minimum_filter(y, size=window_size, mode='constant')
     return baseline
 
-def normalize_spectrum(y, method='max'):
+def normalize_spectrum(y, x=None, method='max'):
     """
     Normalizace spektra
-    Parametry:
-        y: spektrum
-        method: 'max' (na maximum), 'area' (na plochu), 'minmax' (na rozsah 0-1)
+    method:
+      - 'max'    : maximum = 1
+      - 'area'   : plocha = 1 (integrál |y| dx)
+      - 'minmax' : 0-1
     """
+    y = np.asarray(y)
+
     if method == 'max':
         max_val = np.max(y)
         return y / max_val if max_val != 0 else y
+
     elif method == 'area':
-        # Použijeme np.trapezoid (nová verze) nebo fallback na ruční výpočet
-        try:
-            area = np.trapezoid(np.abs(y))
-        except AttributeError:
-            # Fallback pro starší NumPy verze
-            area = np.sum(np.abs(y))
+        ay = np.abs(y)
+        if x is None:
+            area = float(np.sum((ay[:-1] + ay[1:]) * 0.5))
+        else:
+            x = np.asarray(x)
+            dx = np.diff(x)
+            if len(dx) != len(ay) - 1:
+                area = float(np.sum((ay[:-1] + ay[1:]) * 0.5))
+            else:
+                area = float(np.sum((ay[:-1] + ay[1:]) * 0.5 * dx))
         return y / area if area != 0 else y
+
     elif method == 'minmax':
         min_val, max_val = np.min(y), np.max(y)
-        if max_val - min_val != 0:
-            return (y - min_val) / (max_val - min_val)
-        else:
-            return y
-    else:
-        return y
+        return (y - min_val) / (max_val - min_val) if (max_val - min_val) != 0 else y
 
-# --- POMOCNÉ FUNKCE ---
-
+    return y
 def get_voltage_from_filename(filename):
     """Vytáhne poslední číslo před 'mV'."""
     matches = re.findall(r'([-\d]+)mV', filename)
@@ -408,13 +411,16 @@ if uploaded_files:
             
             # Generování popisku podle zvoleného formátu
             if "Název souboru" in label_format_mode:
-                new_item['label'] = Path(item['filename']).stem
+                new_item['display_label'] = Path(item['filename']).stem
+                new_item['label'] = new_item['display_label']
             elif "Vlastní šablona" in label_format_mode and label_template:
                 label = label_template.replace("{voltage}", str(final_volts))
                 label = label.replace("{filename}", Path(item['filename']).stem)
-                new_item['label'] = label
+                new_item['display_label'] = label
+                new_item['label'] = new_item['display_label']
             else:  # "Jen hodnota"
-                new_item['label'] = f"{final_volts} mV"
+                new_item['display_label'] = f"{final_volts} mV"
+                new_item['label'] = new_item['display_label']
             
             processed_batch.append(new_item)
         
@@ -466,7 +472,7 @@ if uploaded_files:
             options=options,
             default=st.session_state.voltage_selection,
             help="Pořadí zde určuje pořadí v grafu (odspodu nahoru)",
-            key="voltage_multiselect"
+            key=f"voltage_multiselect_{label_format_mode}_{force_minus}"
         )
         
         # Aktualizace session state
@@ -560,7 +566,7 @@ if uploaded_files:
             options=options,
             default=st.session_state.general_selection,
             help="Vyberte spektra a přeuspořádejte je tažením. Pořadí zde = pořadí v grafu odspodu nahoru.",
-            key="general_multiselect"
+            key=f"general_multiselect_{label_mode}_{sort_mode}"
         )
         
         # Aktualizace session state
@@ -712,7 +718,7 @@ if uploaded_files:
             options=options,
             default=st.session_state.advanced_selection,
             help="Pořadí zde určuje pořadí v grafu (odspodu nahoru)",
-            key="advanced_multiselect"
+            key=f"advanced_multiselect_{current_mode_key}_{sort_mode}"
         )
         
         # Aktualizace session state
@@ -1030,7 +1036,7 @@ if uploaded_files:
                     if "Maximum" in norm_method:
                         y_c = normalize_spectrum(y_c, method='max') * norm_scale
                     elif "Plocha" in norm_method:
-                        y_c = normalize_spectrum(y_c, method='area') * norm_scale
+                        y_c = normalize_spectrum(y_c, x=x_c, method='area') * norm_scale
                     else:  # Min-Max
                         y_c = normalize_spectrum(y_c, method='minmax') * norm_scale
                 
@@ -1119,7 +1125,7 @@ if uploaded_files:
                 if "Maximum" in norm_method:
                     y_c = normalize_spectrum(y_c, method='max') * norm_scale
                 elif "Plocha" in norm_method:
-                    y_c = normalize_spectrum(y_c, method='area') * norm_scale
+                    y_c = normalize_spectrum(y_c, x=x_c, method='area') * norm_scale
                 else:  # Min-Max
                     y_c = normalize_spectrum(y_c, method='minmax') * norm_scale
             
