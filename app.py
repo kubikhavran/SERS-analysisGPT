@@ -294,7 +294,6 @@ with col_template:
 st.sidebar.header("🎯 Režim Práce")
 work_mode = st.sidebar.radio(
     "Vyberte typ spekter:",
-    ["📊 Spektra s napětím (série)", "📈 Obecná spektra (libovolná)", "🔧 Pokročilý režim (max. kontrola)"],
     help="Série = spektra měřená pod napětím, Obecná = jakákoliv spektra, Pokročilý = plná kontrola nad vším"
 )
 
@@ -579,7 +578,6 @@ if uploaded_files:
     # ======================
     # REŽIM 3: POKROČILÝ
     # ======================
-    else:  # Pokročilý režim
         with st.sidebar.expander("🔧 Pokročilá kontrola", expanded=True):
             st.info("💪 Tento režim kombinuje všechny možnosti")
             
@@ -587,13 +585,11 @@ if uploaded_files:
             has_voltage_files = any(item['has_voltage'] for item in all_files_meta)
             
             if has_voltage_files:
-                use_voltage_mode = st.checkbox(
                     "Použít napěťový režim",
                     value=True,
                     help="Zapnout speciální funkce pro napěťové série"
                 )
             else:
-                use_voltage_mode = False
                 st.warning("⚠️ Nebyly detekovány žádné hodnoty napětí v názvech souborů")
             
             # Typ popisků
@@ -604,13 +600,11 @@ if uploaded_files:
             
             # Řazení
             sort_options = ["Podle názvu", "Podle pořadí nahrání"]
-            if use_voltage_mode:
                 sort_options.append("Podle napětí")
             sort_options.append("Vlastní")
             
             sort_mode = st.radio("Řazení:", sort_options)
             
-            if use_voltage_mode:
                 # Napěťové funkce
                 st.divider()
                 force_minus = st.checkbox("Záporné hodnoty napětí", value=True)
@@ -619,22 +613,16 @@ if uploaded_files:
                 # Vlastní formát popisků
                 st.divider()
                 st.write("**📝 Formát popisků:**")
-                adv_label_format = st.radio(
                     "Typ:",
                     ["Jen hodnota", "Vlastní šablona", "Název souboru"],
                     index=0,
-                    key="adv_label_format"
                 )
                 
-                if adv_label_format == "Vlastní šablona":
-                    adv_label_template = st.text_input(
                         "Šablona:",
                         "{voltage} mV",
                         help="Použijte {voltage} pro hodnotu napětí",
-                        key="adv_label_template"
                     )
                 else:
-                    adv_label_template = None
                 
                 # Zpracování
                 for item in all_files_meta:
@@ -645,10 +633,7 @@ if uploaded_files:
                         item['volts'] = final_volts
                         
                         # Generování popisku
-                        if "Název souboru" in adv_label_format:
                             item['display_label'] = Path(item['filename']).stem
-                        elif "Vlastní šablona" in adv_label_format and adv_label_template:
-                            label = adv_label_template.replace("{voltage}", str(final_volts))
                             label = label.replace("{filename}", Path(item['filename']).stem)
                             item['display_label'] = label
                         else:  # "Jen hodnota"
@@ -674,20 +659,12 @@ if uploaded_files:
                 all_files_meta.sort(key=lambda x: x['filename'])
         
         # Reset selection pokud se změnil režim nebo typ popisků
-        current_mode_key = f"{use_voltage_mode}_{label_mode if not use_voltage_mode else adv_label_format if use_voltage_mode else 'default'}"
-        if 'prev_mode_advanced' not in st.session_state:
-            st.session_state.prev_mode_advanced = current_mode_key
         
-        if st.session_state.prev_mode_advanced != current_mode_key:
             # Reset výběru při změně módu
-            st.session_state.prev_mode_advanced = current_mode_key
-            if 'advanced_selection' in st.session_state:
-                del st.session_state.advanced_selection
         
         # Výběr spekter
         options = [item['display_label'] for item in all_files_meta]
         
-        if use_voltage_mode and 'auto_step' in locals():
             default_selection = [item['display_label'] for item in all_files_meta 
                                 if item.get('has_voltage') and abs(item['raw_volts']) % auto_step == 0]
         else:
@@ -702,27 +679,18 @@ if uploaded_files:
         invert_adv = col3.button("🔄 Invertovat", use_container_width=True, key="invert_adv")
         
         # Inicializace session state
-        if 'advanced_selection' not in st.session_state or select_all_adv or select_none_adv or invert_adv:
             if select_all_adv:
-                st.session_state.advanced_selection = options
             elif select_none_adv:
-                st.session_state.advanced_selection = []
             elif invert_adv:
-                current = st.session_state.get('advanced_selection', default_selection)
-                st.session_state.advanced_selection = [opt for opt in options if opt not in current]
             else:
-                st.session_state.advanced_selection = default_selection
         
         selected_labels = st.multiselect(
             "Zahrnout do grafu:",
             options=options,
-            default=st.session_state.advanced_selection,
             help="Pořadí zde určuje pořadí v grafu (odspodu nahoru)",
-            key=f"advanced_multiselect_{current_mode_key}_{sort_mode}"
         )
         
         # Aktualizace session state
-        st.session_state.advanced_selection = selected_labels
         
         final_data_list = [item for item in all_files_meta if item['display_label'] in selected_labels]
 
@@ -1356,7 +1324,6 @@ else:
         - Flexibilní systém pojmenování
         - Vlastní nebo automatické popisky
         
-        **🔧 Pokročilý režim:**
         - Kombinuje všechny funkce
         - Maximální kontrola nad každým aspektem
         - Vhodné pro zkušené uživatele
