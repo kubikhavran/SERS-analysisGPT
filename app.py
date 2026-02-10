@@ -547,6 +547,16 @@ if uploaded_files:
         
         # Výběr spekter
         options = [item['display_label'] for item in all_files_meta]
+
+        # --- FIX: Streamlit multiselect nesmí mít default hodnoty, které nejsou v options ---
+        prev = st.session_state.get("general_selection", [])
+        safe_default = [x for x in prev if x in options]
+        
+        if not safe_default:
+            safe_default = options
+        
+        st.session_state.general_selection = safe_default
+
         
         # Rychlé akce
         st.write("### 🎯 Výběr Spekter")
