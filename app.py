@@ -19,7 +19,7 @@ st.set_page_config(page_title="SERS Plotter v12 - Universal", layout="wide")
 
 st.title("🧪 Univerzální Generátor SERS Spekter pro Publikace")
 st.markdown("""
-**v12.2**: Vylepšený výběr spekter, vlastní šablony popisků, rychlé akce
+**v13.0**: Zjednodušený program - pouze 2 režimy (Napětí a Obecná spektra)
 """)
 
 # --- FUNKCE PRO BASELINE KOREKCI ---
@@ -294,7 +294,8 @@ with col_template:
 st.sidebar.header("🎯 Režim Práce")
 work_mode = st.sidebar.radio(
     "Vyberte typ spekter:",
-    help="Série = spektra měřená pod napětím, Obecná = jakákoliv spektra, Pokročilý = plná kontrola nad vším"
+    ["📊 Spektra s napětím (série)", "📈 Obecná spektra (libovolná)"],
+    help="Série = spektra měřená pod napětím, Obecná = jakákoliv spektra"
 )
 
 uploaded_files = st.file_uploader(
@@ -574,126 +575,6 @@ if uploaded_files:
         # Zachování pořadí z multiselect (multiselect v Streamlit zachovává pořadí jak uživatel vybírá)
         label_to_item = {item['display_label']: item for item in all_files_meta}
         final_data_list = [label_to_item[label] for label in selected_labels if label in label_to_item]
-    
-    # ======================
-    # REŽIM 3: POKROČILÝ
-    # ======================
-        with st.sidebar.expander("🔧 Pokročilá kontrola", expanded=True):
-            st.info("💪 Tento režim kombinuje všechny možnosti")
-            
-            # Detekce napětí
-            has_voltage_files = any(item['has_voltage'] for item in all_files_meta)
-            
-            if has_voltage_files:
-                    "Použít napěťový režim",
-                    value=True,
-                    help="Zapnout speciální funkce pro napěťové série"
-                )
-            else:
-                st.warning("⚠️ Nebyly detekovány žádné hodnoty napětí v názvech souborů")
-            
-            # Typ popisků
-            label_mode = st.radio(
-                "Typ popisků:",
-                ["Auto (napětí pokud je, jinak název)", "Název souboru", "Číslo", "Vlastní"],
-            )
-            
-            # Řazení
-            sort_options = ["Podle názvu", "Podle pořadí nahrání"]
-                sort_options.append("Podle napětí")
-            sort_options.append("Vlastní")
-            
-            sort_mode = st.radio("Řazení:", sort_options)
-            
-                # Napěťové funkce
-                st.divider()
-                force_minus = st.checkbox("Záporné hodnoty napětí", value=True)
-                auto_step = st.number_input("Krok pro auto-výběr (mV)", value=100, step=10)
-                
-                # Vlastní formát popisků
-                st.divider()
-                st.write("**📝 Formát popisků:**")
-                    "Typ:",
-                    ["Jen hodnota", "Vlastní šablona", "Název souboru"],
-                    index=0,
-                )
-                
-                        "Šablona:",
-                        "{voltage} mV",
-                        help="Použijte {voltage} pro hodnotu napětí",
-                    )
-                else:
-                
-                # Zpracování
-                for item in all_files_meta:
-                    if item['has_voltage']:
-                        final_volts = item['raw_volts']
-                        if force_minus and final_volts > 0:
-                            final_volts = -final_volts
-                        item['volts'] = final_volts
-                        
-                        # Generování popisku
-                            item['display_label'] = Path(item['filename']).stem
-                            label = label.replace("{filename}", Path(item['filename']).stem)
-                            item['display_label'] = label
-                        else:  # "Jen hodnota"
-                            item['display_label'] = f"{final_volts} mV"
-                    else:
-                        item['display_label'] = Path(item['filename']).stem
-                
-                # Řazení podle napětí
-                if sort_mode == "Podle napětí":
-                    all_files_meta.sort(key=lambda x: x.get('volts', 0))
-            else:
-                # Obecný režim bez napětí
-                for idx, item in enumerate(all_files_meta):
-                    if label_mode == "Název souboru":
-                        item['display_label'] = Path(item['filename']).stem
-                    elif label_mode == "Číslo":
-                        item['display_label'] = f"Spektrum {idx + 1}"
-                    else:
-                        item['display_label'] = Path(item['filename']).stem
-            
-            # Aplikace řazení
-            if sort_mode == "Podle názvu":
-                all_files_meta.sort(key=lambda x: x['filename'])
-        
-        # Reset selection pokud se změnil režim nebo typ popisků
-        
-            # Reset výběru při změně módu
-        
-        # Výběr spekter
-        options = [item['display_label'] for item in all_files_meta]
-        
-            default_selection = [item['display_label'] for item in all_files_meta 
-                                if item.get('has_voltage') and abs(item['raw_volts']) % auto_step == 0]
-        else:
-            default_selection = options
-        
-        # Rychlé akce
-        st.write("### 🎯 Výběr Spekter")
-        col1, col2, col3 = st.columns(3)
-        
-        select_all_adv = col1.button("✅ Vybrat vše", use_container_width=True, key="select_all_adv")
-        select_none_adv = col2.button("❌ Zrušit vše", use_container_width=True, key="select_none_adv")
-        invert_adv = col3.button("🔄 Invertovat", use_container_width=True, key="invert_adv")
-        
-        # Inicializace session state
-            if select_all_adv:
-            elif select_none_adv:
-            elif invert_adv:
-            else:
-        
-        selected_labels = st.multiselect(
-            "Zahrnout do grafu:",
-            options=options,
-            help="Pořadí zde určuje pořadí v grafu (odspodu nahoru)",
-        )
-        
-        # Aktualizace session state
-        
-        final_data_list = [item for item in all_files_meta if item['display_label'] in selected_labels]
-
     # --- NASTAVENÍ VZHLEDU ---
     st.sidebar.header("2️⃣ Vzhled a Export")
     
@@ -1277,11 +1158,11 @@ if uploaded_files:
 else:
     # Uvítací obrazovka
     st.info("""
-    ### 👋 Vítejte v SERS Plotter v12.2!
+    ### 👋 Vítejte v SERS Plotter v13.0!
     
     **Jak začít:**
     1. Nahrajte .txt soubory s vašimi Ramanovými spektry
-    2. Vyberte režim práce (napěťové série, obecná spektra, nebo pokročilý)
+    2. Vyberte režim práce (napěťové série nebo obecná spektra)
     3. Použijte rychlá tlačítka (✅ Vybrat vše, ❌ Zrušit vše, 🔄 Invertovat)
     4. Nastavte vlastní formát popisků (volitelné)
     5. Aplikujte baseline korekci a normalizaci (podle potřeby)
@@ -1289,18 +1170,18 @@ else:
     7. Uložte nastavení jako šablonu
     8. Exportujte finální graf
     
-    **Nové ve v12.2:**
-    - ⚡ **Rychlé akce** - tlačítka pro výběr/zrušení/invertování spekter
-    - 📝 **Vlastní šablony popisků** - např. "Vzorek {voltage}mV" nebo "{voltage}mV dopředný sken"
-    - 🎯 **Lepší multiselect** - přehlednější výběr a řazení spekter
-    - 🔄 **Drag-and-drop** - přeuspořádání spekter tažením v multiselect
+    **Nové ve v13.0:**
+    - 🎯 **Zjednodušení** - pouze 2 jasné režimy (Napětí a Obecná)
+    - ⚡ **Rychlejší** - odstraněn složitý pokročilý režim
+    - 🧹 **Přehlednější kód** - snazší údržba a ladění
     
-    **Předchozí funkce:**
+    **Klíčové funkce:**
     - 💾 Šablony nastavení - ukládání a sdílení
     - 🔬 Baseline korekce (ALS, Polynom, Rolling Ball)
     - 📊 Normalizace spekter
-    - 🎯 Tři režimy práce
+    - 📝 Vlastní šablony popisků
     - 📍 Pokročilá správa píků
+    - ⚡ Rychlé akce pro výběr spekter
     
     **Podporované formáty:**
     - `.txt` soubory se dvěma sloupci (x, y) oddělenými mezerou nebo tabulátorem
@@ -1323,10 +1204,7 @@ else:
         - Pro jakákoliv spektra bez napětí
         - Flexibilní systém pojmenování
         - Vlastní nebo automatické popisky
-        
-        - Kombinuje všechny funkce
-        - Maximální kontrola nad každým aspektem
-        - Vhodné pro zkušené uživatele
+        - Různé možnosti řazení
         
         ### Baseline korekce
         
