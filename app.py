@@ -679,9 +679,17 @@ if uploaded_files:
         with col2:
             font_size = st.slider("Velikost písma:", 8, 30, 14, 1)
         
+        
         # Pokročilé
         with st.expander("⚙️ Pokročilé styly", expanded=False):
             axis_line_width = st.slider("Tloušťka os:", 0.5, 3.0, 1.5, 0.1)
+            
+            # --- NOVÉ: Posuvníky pro popisky ---
+            axis_label_size = st.slider("Velikost popisků os:", 8, 36, 14, 1)
+            spectrum_label_size = st.slider("Velikost popisků spekter:", 6, 36, 14, 1)
+            spectrum_label_rotation = st.slider("Úhel popisků spekter:", -90, 90, 0, 5)
+            # -----------------------------------
+            
             label_position = st.radio("Pozice popisků spekter:", ["Vpravo", "Uvnitř grafu"], index=0)
             smooth_spectra = st.checkbox("Vyhlazení spekter (Savitzky-Golay)", value=True)
             if smooth_spectra:
@@ -1020,7 +1028,8 @@ if uploaded_files:
                     color=mpl_colors[i],
                     va='center',
                     ha='left',
-                    fontsize=font_size,
+                    fontsize=spectrum_label_size,      # ZMĚNĚNO: vlastní velikost
+                    rotation=spectrum_label_rotation,  # PŘIDÁNO: rotace textu
                     fontweight='bold',
                     transform=trans,
                     clip_on=False
@@ -1033,7 +1042,8 @@ if uploaded_files:
                     color=mpl_colors[i],
                     va='center',
                     ha='right' if not invert_x else 'left',
-                    fontsize=font_size,
+                    fontsize=spectrum_label_size,      # ZMĚNĚNO: vlastní velikost
+                    rotation=spectrum_label_rotation,  # PŘIDÁNO: rotace textu
                     fontweight='bold'
                 )
             
@@ -1092,6 +1102,8 @@ if uploaded_files:
                     )
         
         # Nastavení os
+        ax.set_xlabel(xlabel_text, fontweight='bold', fontsize=axis_label_size)
+        ax.set_ylabel(ylabel_text, fontweight='bold', fontsize=axis_label_size)
         ax.set_xlabel(xlabel_text, fontweight='bold')
         ax.set_ylabel(ylabel_text, fontweight='bold')
         
