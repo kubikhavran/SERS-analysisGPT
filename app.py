@@ -601,7 +601,8 @@ if uploaded_files:
     with st.sidebar.expander("📏 Rozměry obrázku", expanded=False):
         preset = st.selectbox(
             "Předvolby:",
-            ["Vlastní", "Publikace (1200×1000)", "Prezentace (1920×1080)", "Poster (2400×1800)"]
+            ["Vlastní", "Publikace (1200×1000)", "Prezentace (1920×1080)", "Poster (2400×1800)"],
+            key="preset"
         )
         
         if preset == "Publikace (1200×1000)":
@@ -613,10 +614,10 @@ if uploaded_files:
         else:
             col_w, col_h = st.columns(2)
             with col_w:
-                img_width_px = st.number_input("Šířka (px)", value=1200, step=100)
+                img_width_px = st.number_input("Šířka (px)", value=1200, step=100, key="img_width_px")
             with col_h:
-                img_height_px = st.number_input("Výška (px)", value=1000, step=100)
-            img_dpi = st.number_input("DPI", value=300, step=50, help="Pro publikace doporučeno 300")
+                img_height_px = st.number_input("Výška (px)", value=1000, step=100, key="img_height_px")
+            img_dpi = st.number_input("DPI", value=300, step=50, help="Pro publikace doporučeno 300", key="img_dpi")
         
         figsize_w = img_width_px / img_dpi
         figsize_h = img_height_px / img_dpi
@@ -697,18 +698,21 @@ if uploaded_files:
                 smooth_poly = st.slider("Polynom řádu:", 1, 5, 3, 1)
     
     # --- BASELINE KOREKCE ---
+    # --- BASELINE KOREKCE ---
     with st.sidebar.expander("🔬 Baseline Korekce", expanded=False):
         apply_baseline = st.checkbox(
             "Aplikovat baseline korekci",
             value=False,
-            help="Odstraní fluorescenční pozadí ze spekter"
+            help="Odstraní fluorescenční pozadí ze spekter",
+            key="apply_baseline"
         )
         
         if apply_baseline:
             baseline_method = st.selectbox(
                 "Metoda:",
                 ["ALS (Asymmetric Least Squares)", "Polynom", "Rolling Ball"],
-                help="ALS je nejvšestrannější, Polynom je rychlý, Rolling Ball pro jednoduché pozadí"
+                help="ALS je nejvšestrannější, Polynom je rychlý, Rolling Ball pro jednoduché pozadí",
+                key="baseline_method"
             )
             
             if "ALS" in baseline_method:
@@ -717,39 +721,45 @@ if uploaded_files:
                     "Vyhlazení (λ):",
                     100000, 10000000, 1000000, 100000,
                     help="Větší hodnota = hladší baseline",
-                    format="%d"
+                    format="%d",
+                    key="baseline_lam"
                 )
                 baseline_p = st.slider(
                     "Asymetrie (p):",
                     0.001, 0.1, 0.01, 0.001,
                     help="Menší hodnota = více se přizpůsobí minimům",
-                    format="%.3f"
+                    format="%.3f",
+                    key="baseline_p"
                 )
                 baseline_niter = st.slider(
                     "Iterace:",
                     5, 20, 10, 1,
-                    help="Více iterací = přesnější, ale pomalejší"
+                    help="Více iterací = přesnější, ale pomalejší",
+                    key="baseline_niter"
                 )
             
             elif "Polynom" in baseline_method:
                 baseline_degree = st.slider(
                     "Stupeň polynomu:",
                     1, 6, 3, 1,
-                    help="Vyšší stupeň = složitější křivka baseline"
+                    help="Vyšší stupeň = složitější křivka baseline",
+                    key="baseline_degree"
                 )
             
             else:  # Rolling Ball
                 baseline_window = st.slider(
                     "Velikost okna:",
                     10, 200, 50, 5,
-                    help="Větší okno = hladší baseline"
+                    help="Větší okno = hladší baseline",
+                    key="baseline_window"
                 )
             
             # Náhled baseline
             show_baseline_preview = st.checkbox(
                 "Zobrazit náhled baseline",
                 value=False,
-                help="Přidá do grafu samotnou baseline pro kontrolu"
+                help="Přidá do grafu samotnou baseline pro kontrolu",
+                key="show_baseline_preview"
             )
     
     # --- NORMALIZACE ---
@@ -757,24 +767,27 @@ if uploaded_files:
         apply_normalization = st.checkbox(
             "Normalizovat spektra",
             value=False,
-            help="Přizpůsobí všechna spektra na stejnou velikost"
+            help="Přizpůsobí všechna spektra na stejnou velikost",
+            key="apply_normalization"
         )
         
         if apply_normalization:
             norm_method = st.selectbox(
                 "Metoda normalizace:",
                 ["Maximum = 1", "Plocha = 1", "Min-Max (0-1)"],
-                help="Maximum: nejjednodušší, Plocha: pro kvantitativní porovnání, Min-Max: celý rozsah 0-1"
+                help="Maximum: nejjednodušší, Plocha: pro kvantitativní porovnání, Min-Max: celý rozsah 0-1",
+                key="norm_method"
             )
             
             norm_scale = st.slider(
                 "Škálování po normalizaci:",
                 100, 10000, 1000, 100,
-                help="Násobitel pro lepší vizualizaci"
+                help="Násobitel pro lepší vizualizaci",
+                key="norm_scale"
             )
             
             st.info("💡 Normalizace se aplikuje před offsetem mezi spektry")
-
+            
     # --- SPRÁVA PÍKŮ ---
     st.sidebar.header("3️⃣ Správa Píků")
     
@@ -782,14 +795,16 @@ if uploaded_files:
         peak_target = st.radio(
             "Zobrazit píky u:",
             ["Nejvyšší spektrum", "Nejnižší spektrum", "Všechna spektra", "Konkrétní spektrum", "Vypnuto"],
-            index=0
+            index=0,
+            key="peak_target"
         )
         
         if peak_target == "Konkrétní spektrum" and final_data_list:
             peak_spectrum_idx = st.selectbox(
                 "Vyberte spektrum:",
                 range(len(final_data_list)),
-                format_func=lambda x: final_data_list[x].get('display_label', final_data_list[x]['filename'])
+                format_func=lambda x: final_data_list[x].get('display_label', final_data_list[x]['filename']),
+                key="peak_spectrum_idx"
             )
         
         st.divider()
@@ -797,20 +812,22 @@ if uploaded_files:
         # Detekce píků
         col1, col2 = st.columns(2)
         with col1:
-            use_auto_peaks = st.checkbox("Auto-detekce", value=True)
+            use_auto_peaks = st.checkbox("Auto-detekce", value=True, key="use_auto_peaks")
         with col2:
-            show_peak_lines = st.checkbox("Vodící čáry", value=True)
+            show_peak_lines = st.checkbox("Vodící čáry", value=True, key="show_peak_lines")
         
         if use_auto_peaks:
             prominence = st.slider(
                 "Citlivost detekce:",
                 10, 2000, 100, 10,
-                help="Vyšší hodnota = méně píků"
+                help="Vyšší hodnota = méně píků",
+                key="prominence"
             )
             min_distance = st.slider(
                 "Min. vzdálenost píků:",
                 5, 100, 30, 5,
-                help="Minimální vzdálenost mezi dvěma píky"
+                help="Minimální vzdálenost mezi dvěma píky",
+                key="min_distance"
             )
         
         st.divider()
@@ -821,22 +838,24 @@ if uploaded_files:
             manual_add_str = st.text_input(
                 "➕ Přidat píky:",
                 "",
-                help="Oddělte čárkou, např: 1001, 1320, 1580"
+                help="Oddělte čárkou, např: 1001, 1320, 1580",
+                key="manual_add_str"
             )
         with col2:
             manual_remove_str = st.text_input(
                 "➖ Odstranit píky:",
                 "",
-                help="Oddělte čárkou, např: 220, 450"
+                help="Oddělte čárkou, např: 220, 450",
+                key="manual_remove_str"
             )
         
         # Styl píků
         with st.expander("🎨 Styl popisků píků", expanded=False):
-            peak_label_size = st.slider("Velikost textu:", 8, 24, 12, 1)
-            label_height_offset = st.slider("Výška nad píkem:", 50, 5000, 500, 50)
-            peak_label_rotation = st.slider("Rotace textu:", 0, 90, 90, 15)
-            peak_line_color = st.color_picker("Barva čar:", "#000000")
-            peak_line_alpha = st.slider("Průhlednost čar:", 0.0, 1.0, 0.8, 0.1)
+            peak_label_size = st.slider("Velikost textu:", 8, 24, 12, 1, key="peak_label_size")
+            label_height_offset = st.slider("Výška nad píkem:", 50, 5000, 500, 50, key="label_height_offset")
+            peak_label_rotation = st.slider("Rotace textu:", 0, 90, 90, 15, key="peak_label_rotation")
+            peak_line_color = st.color_picker("Barva čar:", "#000000", key="peak_line_color")
+            peak_line_alpha = st.slider("Průhlednost čar:", 0.0, 1.0, 0.8, 0.1, key="peak_line_alpha")
 
     # Zpracování manuálních úprav píků
     manual_adds = []
