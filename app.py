@@ -63,6 +63,34 @@ def baseline_rolling_ball(y, window_size=50):
     baseline = minimum_filter(y, size=window_size, mode='constant')
     return baseline
 
+# --- FUNKCE PRO ODSTRANĚNÍ SPIKŮ (KOSMICKÉHO ZÁŘENÍ) ---
+# ... za funkci baseline_rolling_ball ...
+
+def despike_modified_z(y, threshold=7, window=3):
+    """
+    Odstranění spiků pomocí Modified Z-Score algoritmu.
+    """
+    y_out = y.copy()
+    n = len(y)
+    diff = np.diff(y_out)
+    median_diff = np.median(diff)
+    mad = np.median(np.abs(diff - median_diff))
+    if mad == 0:
+        mad = 1e-9
+    modified_z_scores = 0.6745 * (diff - median_diff) / mad
+    spikes = np.abs(modified_z_scores) > threshold
+    spike_indices = np.where(spikes)[0] + 1
+    for idx in spike_indices:
+        start = max(0, idx - window)
+        end = min(n, idx + window + 1)
+        neighborhood_indices = list(range(start, idx)) + list(range(idx + 1, end))
+        neighborhood_values = y_out[neighborhood_indices]
+        if len(neighborhood_values) > 0:
+             y_out[idx] = np.median(neighborhood_values)
+    return y_out
+
+# ... následuje def normalize_spectrum ...
+
 def normalize_spectrum(y, x=None, method='max'):
     """
     Normalizace spektra
@@ -326,7 +354,15 @@ if uploaded_files:
     
     # --- BOČNÍ PANEL: REŽIM-SPECIFICKÁ NASTAVENÍ ---
     st.sidebar.header("1️⃣ Výběr a Úprava Spekter")
-    
+
+    with st.sidebar.expander("🧹 Odstranění spiků (Kosmické záření)", expanded=False):
+        use_despike = st.checkbox("Zapnout Despiking", value=False, help="Odstraní úzké vysoké spiky (kosmické záření) bez rozmazání spektra.")
+        if use_despike:
+            despike_threshold = st.slider("Citlivost (Threshold)", 3.0, 20.0, 7.0, 0.5, help="Menší číslo = maže více. Větší číslo = maže jen extrémní spiky.")
+            despike_window = st.slider("Šířka opravy", 1, 5, 3, 1, help="Kolik bodů okolo spiku se použije pro opravu.")
+    # -----------------------
+
+    # ... pokračuje if "napětím" in work_mode: ...
     # ======================
     # REŽIM 1: SPEKTRA S NAPĚTÍM
     # ======================
@@ -907,7 +943,11 @@ if uploaded_files:
                 x, y = load_data(item['file'])
                 if x is None:
                     continue
-                
+
+                # --- VLOŽIT ZDE (Před filtrací rozsahu) ---
+                if 'use_despike' in locals() and use_despike:
+                    y = despike_modified_z(y, threshold=despike_threshold, window=despike_window)
+                # ------------------------------------------
                 # Filtrace rozsahu
                 mask = (x >= x_range[0]) & (x <= x_range[1])
                 x_c, y_c = x[mask], y[mask]
@@ -995,7 +1035,11 @@ if uploaded_files:
             if x is None:
                 st.warning(f"⚠️ Nepodařilo se načíst soubor: {item['filename']}")
                 continue
-            
+
+            # --- VLOŽIT ZDE (Stejně jako nahoře) ---
+            if 'use_despike' in locals() and use_despike:
+                y = despike_modified_z(y, threshold=despike_threshold, window=despike_window)
+            # ---------------------------------------
             # Filtrace rozsahu
             mask = (x >= x_range[0]) & (x <= x_range[1])
             x_c, y_c = x[mask], y[mask]
